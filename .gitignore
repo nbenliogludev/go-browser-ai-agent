@@ -2,7 +2,7 @@
 bin/
 pkg/
 *.exe
-*.test
+*.test/
 *.out
 
 # Go modules
@@ -13,3 +13,9 @@ vendor/
 
 # GoLand
 .idea/
+
+# Playwright user data (persistent sessions, cache)
+.playwright-user-data/
+
+# Logs
+*.log
