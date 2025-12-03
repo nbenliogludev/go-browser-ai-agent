@@ -1,0 +1,15 @@
+# Go
+bin/
+pkg/
+*.exe
+*.test
+*.out
+
+# Go modules
+vendor/
+
+# macOS
+.DS_Store
+
+# GoLand
+.idea/
