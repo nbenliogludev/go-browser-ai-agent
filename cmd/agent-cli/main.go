@@ -11,7 +11,7 @@ import (
 )
 
 func main() {
-	fmt.Println("Starting AI browser agent (browser bootstrap)...")
+	fmt.Println("Starting AI browser agent (DOM snapshot demo)...")
 
 	mgr, err := browser.NewManager()
 	if err != nil {
@@ -33,7 +33,22 @@ func main() {
 		log.Fatalf("could not navigate to %s: %v", url, err)
 	}
 
-	fmt.Println("Браузер открыт. Сессия persistent (логины/куки сохранятся между запусками).")
-	fmt.Println("Нажмите Enter в терминале, чтобы завершить работу агента и закрыть браузер.")
+	fmt.Println("Страница загружена, извлекаю DOM-снапшот...")
+
+	snapshot, err := mgr.Snapshot(50)
+	if err != nil {
+		log.Fatalf("could not snapshot page: %v", err)
+	}
+
+	fmt.Printf("URL:   %s\n", snapshot.URL)
+	fmt.Printf("Title: %s\n", snapshot.Title)
+	fmt.Printf("Elements (up to %d):\n", len(snapshot.Elements))
+
+	for _, el := range snapshot.Elements {
+		fmt.Printf("- %s [%s] id=%s selector=%s text=%q\n",
+			el.Tag, el.Role, el.ID, el.Selector, el.Text)
+	}
+
+	fmt.Println("\nНажмите Enter, чтобы закрыть браузер...")
 	_, _ = reader.ReadString('\n')
 }
