@@ -8,11 +8,15 @@ import (
 
 	"github.com/nbenliogludev/go-browser-ai-agent/internal/browser"
 	"github.com/nbenliogludev/go-browser-ai-agent/internal/llm"
+	"github.com/nbenliogludev/go-browser-ai-agent/internal/planner"
 )
 
 type Agent struct {
 	browser *browser.Manager
 	llm     llm.Client
+
+	// План, построенный high-level планировщиком для одной задачи.
+	plan *planner.Plan
 
 	// Простая память в рамках одного запуска агента:
 	// сюда складываем текст, прочитанный через read_content.
@@ -23,6 +27,7 @@ func NewAgent(b *browser.Manager, c llm.Client) *Agent {
 	return &Agent{
 		browser:      b,
 		llm:          c,
+		plan:         nil,
 		observations: nil,
 	}
 }
@@ -35,6 +40,18 @@ func (a *Agent) Run(task string, maxSteps int) error {
 	// каждый запуск — новая история
 	a.observations = nil
 
+	// 1) Пытаемся построить high-level план через отдельного планировщика.
+	plan, err := planner.BuildPlan(task)
+	if err != nil {
+		fmt.Printf("Планировщик не смог построить план: %v\nРаботаем без явного плана.\n", err)
+	} else {
+		a.plan = plan
+		fmt.Println("План от планировщика:")
+		for _, s := range plan.Steps {
+			fmt.Printf("- [%d] %s (критерий успеха: %s)\n", s.ID, s.Description, s.SuccessCriteria)
+		}
+	}
+
 	for step := 1; step <= maxSteps; step++ {
 		fmt.Printf("\n=== Шаг %d ===\n", step)
 
@@ -46,7 +63,11 @@ func (a *Agent) Run(task string, maxSteps int) error {
 		fmt.Printf("Текущая страница: %s (%s), элементов: %d\n",
 			snapshot.Title, snapshot.URL, len(snapshot.Elements))
 
-		effectiveTask := buildTaskWithHistory(task, a.observations)
+		// 2) Собираем "расширенную" задачу:
+		// - исходный пользовательский запрос
+		// - план (если есть)
+		// - предыдущие наблюдения (прочитанный текст)
+		effectiveTask := buildTaskWithHistory(task, a.plan, a.observations)
 
 		decision, err := a.llm.DecideAction(llm.DecisionInput{
 			Task:     effectiveTask,
@@ -107,7 +128,6 @@ func (a *Agent) executeWithSecurity(reader *bufio.Reader, snapshot *browser.Page
 				return fmt.Errorf("no text provided for type action")
 			}
 
-			// Лёгкая защита от попыток печатать туда, куда не надо:
 			if target.Tag != "input" && target.Tag != "textarea" {
 				return fmt.Errorf("cannot type into non-textbox element: tag=%s role=%s selector=%s",
 					target.Tag, target.Role, target.Selector)
@@ -139,11 +159,12 @@ func (a *Agent) executeWithSecurity(reader *bufio.Reader, snapshot *browser.Page
 		}
 
 		fmt.Printf("Выполняю навигацию на %s\n", action.URL)
-		_, err := a.browser.Page.Goto(action.URL)
-		return err
+		if _, err := a.browser.Page.Goto(action.URL); err != nil {
+			return err
+		}
+		return nil
 
 	case llm.ActionReadContent:
-		// Чтение текста вокруг элемента: не разрушающее действие.
 		target, ok := findElementByID(snapshot, action.TargetID)
 		if !ok {
 			return fmt.Errorf("no element with id %q in snapshot", action.TargetID)
@@ -180,7 +201,6 @@ func (a *Agent) executeWithSecurity(reader *bufio.Reader, snapshot *browser.Page
 		return nil
 	}
 
-	// Этот return почти недостижим, но успокаивает линтеры / IDE.
 	return nil
 }
 
@@ -236,23 +256,38 @@ func askForConfirmation(reader *bufio.Reader, prompt string) bool {
 	return line == "y" || line == "yes" || line == "д" || line == "да"
 }
 
-// Собираем high-level задачу + последние наблюдения в одну строку для LLM.
-func buildTaskWithHistory(baseTask string, observations []string) string {
-	if len(observations) == 0 {
-		return baseTask
-	}
-
-	const maxHistory = 5
-	start := 0
-	if len(observations) > maxHistory {
-		start = len(observations) - maxHistory
-	}
-
+func buildTaskWithHistory(baseTask string, plan *planner.Plan, observations []string) string {
 	var sb strings.Builder
+
+	sb.WriteString("GLOBAL TASK:\n")
 	sb.WriteString(baseTask)
-	sb.WriteString("\n\nPREVIOUS OBSERVATIONS:\n")
-	for i, obs := range observations[start:] {
-		sb.WriteString(fmt.Sprintf("%d) %s\n", i+1, obs))
+	sb.WriteString("\n")
+
+	if plan != nil && len(plan.Steps) > 0 {
+		sb.WriteString("\nPLAN (high-level steps):\n")
+		for _, s := range plan.Steps {
+			sb.WriteString(fmt.Sprintf("%d) %s\n   success_criteria: %s\n", s.ID, s.Description, s.SuccessCriteria))
+		}
 	}
+
+	if len(observations) > 0 {
+		const maxHistory = 5
+		start := 0
+		if len(observations) > maxHistory {
+			start = len(observations) - maxHistory
+		}
+
+		sb.WriteString("\nPREVIOUS OBSERVATIONS (last UI reads):\n")
+		for i, obs := range observations[start:] {
+			trimmed := obs
+			if len(trimmed) > 400 {
+				trimmed = trimmed[:400] + "..."
+			}
+			sb.WriteString(fmt.Sprintf("%d) %s\n", i+1, trimmed))
+		}
+	}
+
+	sb.WriteString("\nYou are a browser agent. Use the PLAN above as guidance, but choose a single concrete action (navigate / click / type / read_content / finish) appropriate for the CURRENT page.\n")
+
 	return sb.String()
 }
