@@ -23,7 +23,6 @@ func (m *Manager) Snapshot(limit int) (*PageSnapshot, error) {
 		return nil, fmt.Errorf("page is not initialized")
 	}
 
-	// В playwright-go URL обычно не возвращает ошибку.
 	url := m.Page.URL()
 
 	title, err := m.Page.Title()
@@ -34,20 +33,32 @@ func (m *Manager) Snapshot(limit int) (*PageSnapshot, error) {
 	script := `(limit) => {
 		const elements = [];
 		const candidates = Array.from(
-			document.querySelectorAll('a, button, input, [role="button"], [role="link"]')
+			document.querySelectorAll(
+				'a, button, input, textarea, [role="button"], [role="link"], [role="textbox"]'
+			)
 		);
 
 		for (const el of candidates) {
 			if (elements.length >= limit) break;
 
 			const rect = el.getBoundingClientRect();
-
+			// пропускаем невидимые элементы
 			if (rect.width === 0 || rect.height === 0) continue;
+
+			const tag = el.tagName.toLowerCase();
+
+			// для input берём только текстовые типы
+			if (tag === 'input') {
+				const type = (el.getAttribute('type') || 'text').toLowerCase();
+				const allowed = ['text', 'search', 'email', 'password', 'url', 'number'];
+				if (!allowed.includes(type)) continue;
+			}
 
 			const text = (el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || '').trim();
 			if (!text) continue;
 
-			let selector = el.tagName.toLowerCase();
+			// базовый селектор: tag + id/class
+			let selector = tag;
 			if (el.id) {
 				selector += '#' + el.id;
 			} else if (el.className && typeof el.className === 'string') {
@@ -57,9 +68,15 @@ func (m *Manager) Snapshot(limit int) (*PageSnapshot, error) {
 				}
 			}
 
+			// роль: либо из атрибута, либо textbox для input/textarea
+			let role = el.getAttribute('role') || '';
+			if (!role && (tag === 'input' || tag === 'textarea')) {
+				role = 'textbox';
+			}
+
 			elements.push({
-				tag: el.tagName.toLowerCase(),
-				role: el.getAttribute('role') || '',
+				tag,
+				role,
 				text,
 				selector,
 			});
