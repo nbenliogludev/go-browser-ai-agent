@@ -13,12 +13,17 @@ import (
 type Agent struct {
 	browser *browser.Manager
 	llm     llm.Client
+
+	// Простая память в рамках одного запуска агента:
+	// сюда складываем текст, прочитанный через read_content.
+	observations []string
 }
 
 func NewAgent(b *browser.Manager, c llm.Client) *Agent {
 	return &Agent{
-		browser: b,
-		llm:     c,
+		browser:      b,
+		llm:          c,
+		observations: nil,
 	}
 }
 
@@ -27,11 +32,8 @@ func (a *Agent) Run(task string, maxSteps int) error {
 
 	fmt.Printf("Запускаю агента с задачей: %q (maxSteps=%d)\n", task, maxSteps)
 
-	var (
-		prevAction    *llm.Action
-		prevURL       string
-		repeatCounter int
-	)
+	// каждый запуск — новая история
+	a.observations = nil
 
 	for step := 1; step <= maxSteps; step++ {
 		fmt.Printf("\n=== Шаг %d ===\n", step)
@@ -46,8 +48,10 @@ func (a *Agent) Run(task string, maxSteps int) error {
 		fmt.Printf("Текущая страница: %s (%s), элементов: %d\n",
 			snapshot.Title, snapshot.URL, len(snapshot.Elements))
 
+		effectiveTask := buildTaskWithHistory(task, a.observations)
+
 		decision, err := a.llm.DecideAction(llm.DecisionInput{
-			Task:     task,
+			Task:     effectiveTask,
 			Snapshot: snapshot,
 		})
 		if err != nil {
@@ -98,9 +102,7 @@ func (a *Agent) Run(task string, maxSteps int) error {
 			return fmt.Errorf("failed to execute action: %w", err)
 		}
 
-		prevAction = &decision.Action
-		prevURL = currentURL
-
+		// Даём странице немного времени обновиться.
 		a.browser.Page.WaitForTimeout(1500)
 	}
 
@@ -129,27 +131,29 @@ func (a *Agent) executeWithSecurity(reader *bufio.Reader, snapshot *browser.Page
 		switch action.Type {
 		case llm.ActionClick:
 			fmt.Printf("Выполняю click по selector=%s\n", target.Selector)
-			err := a.browser.Page.Click(target.Selector)
-			return err
+			if err := a.browser.Page.Click(target.Selector); err != nil {
+				return err
+			}
+			return nil
 
 		case llm.ActionTypeText:
 			if action.Text == "" {
 				return fmt.Errorf("no text provided for type action")
 			}
 
-			// generic правило: печатаем только в input/textarea
+			// Лёгкая защита от попыток печатать туда, куда не надо:
 			if target.Tag != "input" && target.Tag != "textarea" {
-				return fmt.Errorf(
-					"cannot type into non-input element: tag=%s role=%s selector=%s",
-					target.Tag, target.Role, target.Selector,
-				)
+				return fmt.Errorf("cannot type into non-textbox element: tag=%s role=%s selector=%s",
+					target.Tag, target.Role, target.Selector)
 			}
 
 			fmt.Printf("Выполняю type(%q) в selector=%s (tag=%s role=%s)\n",
 				action.Text, target.Selector, target.Tag, target.Role)
 
-			err := a.browser.Page.Fill(target.Selector, action.Text)
-			return err
+			if err := a.browser.Page.Fill(target.Selector, action.Text); err != nil {
+				return err
+			}
+			return nil
 		}
 
 	case llm.ActionNavigate:
@@ -172,11 +176,45 @@ func (a *Agent) executeWithSecurity(reader *bufio.Reader, snapshot *browser.Page
 		_, err := a.browser.Page.Goto(action.URL)
 		return err
 
+	case llm.ActionReadContent:
+		// Чтение текста вокруг элемента: не разрушающее действие.
+		target, ok := findElementByID(snapshot, action.TargetID)
+		if !ok {
+			return fmt.Errorf("no element with id %q in snapshot", action.TargetID)
+		}
+
+		maxChars := action.MaxChars
+		if maxChars <= 0 || maxChars > 4000 {
+			maxChars = 1500
+		}
+
+		fmt.Printf("ReadContent: читаю текст вокруг элемента %q (selector=%s, maxChars=%d)\n",
+			target.Text, target.Selector, maxChars)
+
+		content, err := a.browser.ReadContent(target.Selector, maxChars)
+		if err != nil {
+			return fmt.Errorf("read_content failed: %w", err)
+		}
+		if content == "" {
+			fmt.Println("ReadContent: пустой текст — возможно, элемент декоративный.")
+			return nil
+		}
+
+		preview := content
+		if len(preview) > 500 {
+			preview = preview[:500] + "..."
+		}
+
+		fmt.Printf("Наблюдение (усечено до 500 символов):\n%s\n", preview)
+		a.observations = append(a.observations, content)
+		return nil
+
 	default:
 		fmt.Printf("Неизвестный тип действия: %q — пропускаю.\n", action.Type)
 		return nil
 	}
 
+	// Этот return почти недостижим, но успокаивает линтеры / IDE.
 	return nil
 }
 
@@ -230,4 +268,25 @@ func askForConfirmation(reader *bufio.Reader, prompt string) bool {
 	line, _ := reader.ReadString('\n')
 	line = strings.TrimSpace(strings.ToLower(line))
 	return line == "y" || line == "yes" || line == "д" || line == "да"
+}
+
+// Собираем high-level задачу + последние наблюдения в одну строку для LLM.
+func buildTaskWithHistory(baseTask string, observations []string) string {
+	if len(observations) == 0 {
+		return baseTask
+	}
+
+	const maxHistory = 5
+	start := 0
+	if len(observations) > maxHistory {
+		start = len(observations) - maxHistory
+	}
+
+	var sb strings.Builder
+	sb.WriteString(baseTask)
+	sb.WriteString("\n\nPREVIOUS OBSERVATIONS:\n")
+	for i, obs := range observations[start:] {
+		sb.WriteString(fmt.Sprintf("%d) %s\n", i+1, obs))
+	}
+	return sb.String()
 }
