@@ -3,10 +3,11 @@ package agent
 import (
 	"bufio"
 	"fmt"
-	"github.com/nbenliogludev/go-browser-ai-agent/internal/browser"
-	"github.com/nbenliogludev/go-browser-ai-agent/internal/llm"
 	"os"
 	"strings"
+
+	"github.com/nbenliogludev/go-browser-ai-agent/internal/browser"
+	"github.com/nbenliogludev/go-browser-ai-agent/internal/llm"
 )
 
 type Agent struct {
@@ -26,6 +27,12 @@ func (a *Agent) Run(task string, maxSteps int) error {
 
 	fmt.Printf("Запускаю агента с задачей: %q (maxSteps=%d)\n", task, maxSteps)
 
+	var (
+		prevAction    *llm.Action
+		prevURL       string
+		repeatCounter int
+	)
+
 	for step := 1; step <= maxSteps; step++ {
 		fmt.Printf("\n=== Шаг %d ===\n", step)
 
@@ -33,6 +40,8 @@ func (a *Agent) Run(task string, maxSteps int) error {
 		if err != nil {
 			return fmt.Errorf("snapshot error: %w", err)
 		}
+
+		currentURL := snapshot.URL
 
 		fmt.Printf("Текущая страница: %s (%s), элементов: %d\n",
 			snapshot.Title, snapshot.URL, len(snapshot.Elements))
@@ -48,6 +57,38 @@ func (a *Agent) Run(task string, maxSteps int) error {
 		fmt.Printf("Thought: %s\n", decision.Thought)
 		fmt.Printf("Action: %+v\n", decision.Action)
 
+		// ---------- детектор зацикливания на вводе текста ----------
+		if prevAction != nil &&
+			decision.Action.Type == llm.ActionTypeText &&
+			prevAction.Type == llm.ActionTypeText &&
+			decision.Action.Text == prevAction.Text && // тот же текст
+			currentURL == prevURL { // на той же странице
+			repeatCounter++
+		} else {
+			repeatCounter = 0
+		}
+
+		// если уже второй раз подряд печатаем одно и то же на той же странице —
+		// считаем, что агент застрял и пробуем отправить форму через Enter
+		if repeatCounter >= 1 {
+			fmt.Println("Похоже, агент застрял на вводе текста — пробую отправить форму через Enter.")
+
+			target, ok := findElementByID(snapshot, decision.Action.TargetID)
+			if ok && (target.Tag == "input" || target.Tag == "textarea") {
+				fmt.Printf("Жму Enter в поле selector=%s\n", target.Selector)
+				if err := a.browser.Page.Press(target.Selector, "Enter"); err != nil {
+					return fmt.Errorf("failed to press Enter: %w", err)
+				}
+				a.browser.Page.WaitForTimeout(1500)
+
+				// обновляем состояние и переходим к следующему шагу
+				prevAction = &decision.Action
+				prevURL = currentURL
+				continue
+			}
+		}
+		// ---------- конец детектора зацикливания ----------
+
 		if decision.Action.Type == llm.ActionFinish {
 			fmt.Println("Агент считает, что задача выполнена (ActionFinish). Останавливаю цикл.")
 			return nil
@@ -56,6 +97,9 @@ func (a *Agent) Run(task string, maxSteps int) error {
 		if err := a.executeWithSecurity(reader, snapshot, decision.Action); err != nil {
 			return fmt.Errorf("failed to execute action: %w", err)
 		}
+
+		prevAction = &decision.Action
+		prevURL = currentURL
 
 		a.browser.Page.WaitForTimeout(1500)
 	}
@@ -92,7 +136,18 @@ func (a *Agent) executeWithSecurity(reader *bufio.Reader, snapshot *browser.Page
 			if action.Text == "" {
 				return fmt.Errorf("no text provided for type action")
 			}
-			fmt.Printf("Выполняю type(%q) в selector=%s\n", action.Text, target.Selector)
+
+			// generic правило: печатаем только в input/textarea
+			if target.Tag != "input" && target.Tag != "textarea" {
+				return fmt.Errorf(
+					"cannot type into non-input element: tag=%s role=%s selector=%s",
+					target.Tag, target.Role, target.Selector,
+				)
+			}
+
+			fmt.Printf("Выполняю type(%q) в selector=%s (tag=%s role=%s)\n",
+				action.Text, target.Selector, target.Tag, target.Role)
+
 			err := a.browser.Page.Fill(target.Selector, action.Text)
 			return err
 		}

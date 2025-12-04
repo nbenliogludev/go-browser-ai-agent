@@ -2,6 +2,7 @@ package browser
 
 import (
 	"fmt"
+	"strings"
 )
 
 type ElementInfo struct {
@@ -47,15 +48,36 @@ func (m *Manager) Snapshot(limit int) (*PageSnapshot, error) {
 
 			const tag = el.tagName.toLowerCase();
 
-			// для input берём только текстовые типы
+			// текстовые input'ы (куда можно вводить текст)
+			let isTextInput = false;
 			if (tag === 'input') {
 				const type = (el.getAttribute('type') || 'text').toLowerCase();
 				const allowed = ['text', 'search', 'email', 'password', 'url', 'number'];
-				if (!allowed.includes(type)) continue;
+				if (allowed.includes(type)) {
+					isTextInput = true;
+				}
+			} else if (tag === 'textarea') {
+				// textarea — всегда текстовый ввод
+				isTextInput = true;
 			}
 
-			const text = (el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || '').trim();
-			if (!text) continue;
+			// учитываем текущее value для input/textarea,
+			// чтобы LLM видел введённый текст
+			const value = (tag === 'input' || tag === 'textarea') ? (el.value || '') : '';
+
+			const rawText =
+				value ||                           // сначала текущее значение поля
+				el.innerText ||
+				el.getAttribute('aria-label') ||
+				el.getAttribute('title') ||
+				el.getAttribute('value') ||
+				'';
+
+			const text = rawText.trim();
+
+			// для кнопок/ссылок без текста — пропускаем,
+			// а вот текстовые поля (input/textarea) считаем интересными даже без текста
+			if (!text && !isTextInput && tag !== 'textarea') continue;
 
 			// базовый селектор: tag + id/class
 			let selector = tag;
@@ -68,9 +90,9 @@ func (m *Manager) Snapshot(limit int) (*PageSnapshot, error) {
 				}
 			}
 
-			// роль: либо из атрибута, либо textbox для input/textarea
+			// роль: либо из атрибута, либо textbox для текстовых input/textarea
 			let role = el.getAttribute('role') || '';
-			if (!role && (tag === 'input' || tag === 'textarea')) {
+			if (!role && isTextInput) {
 				role = 'textbox';
 			}
 
@@ -119,6 +141,32 @@ func (m *Manager) Snapshot(limit int) (*PageSnapshot, error) {
 		Title:    title,
 		Elements: elements,
 	}, nil
+}
+
+// ExtractText — универсальный helper для чтения длинного текста по selector.
+func (m *Manager) ExtractText(selector string, maxLen int) (string, error) {
+	if m == nil || m.Page == nil {
+		return "", fmt.Errorf("page is not initialized")
+	}
+
+	text, err := m.Page.TextContent(selector)
+	if err != nil {
+		return "", fmt.Errorf("could not get text content for selector %q: %w", selector, err)
+	}
+
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return "", nil
+	}
+
+	if maxLen > 0 {
+		runes := []rune(text)
+		if len(runes) > maxLen {
+			text = string(runes[:maxLen])
+		}
+	}
+
+	return text, nil
 }
 
 func strFromMap(m map[string]interface{}, key string) string {

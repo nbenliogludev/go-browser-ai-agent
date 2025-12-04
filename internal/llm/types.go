@@ -11,6 +11,7 @@ const (
 	ActionNavigate ActionType = "navigate"
 	ActionTypeText ActionType = "type"
 	ActionFinish   ActionType = "finish"
+	ActionExtract  ActionType = "extract_text"
 )
 
 type Action struct {
@@ -21,8 +22,9 @@ type Action struct {
 }
 
 type DecisionInput struct {
-	Task     string
-	Snapshot *browser.PageSnapshot
+	Task              string
+	Snapshot          *browser.PageSnapshot
+	LastExtractedText string
 }
 
 type DecisionOutput struct {
