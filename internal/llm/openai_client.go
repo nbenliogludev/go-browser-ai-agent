@@ -6,12 +6,11 @@ import (
 	"fmt"
 	"os"
 
-	openai "github.com/openai/openai-go/v3"
-	"github.com/openai/openai-go/v3/option"
+	openai "github.com/sashabaranov/go-openai"
 )
 
 type OpenAIClient struct {
-	client openai.Client
+	client *openai.Client
 }
 
 func NewOpenAIClient() (*OpenAIClient, error) {
@@ -19,110 +18,85 @@ func NewOpenAIClient() (*OpenAIClient, error) {
 	if apiKey == "" {
 		return nil, fmt.Errorf("OPENAI_API_KEY is not set")
 	}
-
-	client := openai.NewClient(
-		option.WithAPIKey(apiKey),
-	)
-
+	client := openai.NewClient(apiKey)
 	return &OpenAIClient{client: client}, nil
 }
 
+// ОБНОВЛЕННЫЙ ПРОМПТ
 const systemPrompt = `
-You are an autonomous web browsing assistant.
+You are an autonomous browser agent navigating the web.
+You will see a textual representation of the current webpage (DOM Tree).
+Interactive elements are marked with numeric IDs in brackets, e.g., [12] <button>.
 
-Environment:
-- You control a real browser page.
-- On each step you receive:
-  1) A high-level user task.
-  2) A JSON "snapshot" of the current page with a limited list of interactive elements:
-     { "url", "title", "elements": [{ "id", "tag", "role", "text", "selector" }] }
+Your goal is to complete the user's task.
 
-You MUST respond ONLY with a single JSON object of the form:
-
+RESPONSE FORMAT:
+You must strictly respond with a SINGLE JSON object:
 {
-  "thought": "short explanation of what you want to do next (1–2 sentences)",
+  "thought": "Brief reasoning about the state and what to do next",
   "action": {
-    "type": "click" | "navigate" | "type" | "read_content" | "finish",
-    "target_id": "element id from snapshot or empty if not needed",
-    "text": "text to type when type",
-    "url": "url to open when navigate",
-    "max_chars": 0
+    "type": "click" | "type" | "navigate" | "finish",
+    "target_id": 12,        // INTEGER ID from the tree
+    "text": "some text",    // ONLY for "type" action
+    "submit": true,         // OPTIONAL: set to true to press ENTER after typing (CRITICAL for search inputs!)
+    "url": "https://..."    // ONLY for "navigate" action
   }
 }
 
-Action semantics:
-- "click": click on the element with the given target_id.
-- "type": type the provided "text" into the element with the given target_id.
-  Use this ONLY for real text inputs (search boxes, form fields, input/textarea).
-- "navigate": open the given absolute URL in the current tab.
-- "read_content": read human-visible text around the element with the given target_id.
-  The environment will return this text and include it in the next steps of the task
-  under a "PREVIOUS OBSERVATIONS" section. Use this when you need to understand
-  the content of:
-    - user profiles / resumes,
-    - job descriptions,
-    - emails,
-    - product pages,
-    - order checkouts, etc.
-  Set "max_chars" to a reasonable limit (e.g. 1000–2000) to keep context small.
-- "finish": use this when the user's task is fully solved or cannot be reasonably continued.
-
-General rules:
-- Output strictly valid JSON. No comments, no markdown, no extra keys.
-- Always choose a target_id that exists in the current snapshot for "click", "type" and "read_content".
-- Prefer elements whose "text" best matches the user's goal
-  (for example: "Войти", "Откликнуться", "Удалить", "Корзина", "В корзину", "Оформить заказ").
-- Avoid getting stuck: after typing into a search box you usually need to submit the form
-  (e.g. clicking a nearby search button) instead of typing the same query again.
-- For tasks that require understanding page content (reading emails, resumes, job descriptions,
-  product details, delivery addresses, etc.), first navigate and click to the right page,
-  then use "read_content" on the relevant elements before acting.
-- If the page is not suitable for the task or you need human input, return:
-  { "thought": "why you cannot continue", "action": { "type": "finish" } }.
+GUIDELINES:
+1. SEARCHING: Always set "submit": true when typing into search bars. This is much more reliable than clicking a button.
+2. POPUPS: If a cookie banner blocks the view, try to click "Accept" or "Close" first.
+3. ERRORS: If you repeat the same action twice, stop and try a different approach.
 `
 
 func (c *OpenAIClient) DecideAction(input DecisionInput) (*DecisionOutput, error) {
-	if input.Snapshot == nil {
-		return nil, fmt.Errorf("snapshot is nil")
-	}
+	userMessage := fmt.Sprintf(`
+USER TASK: %s
 
-	snapshotJSON, err := json.Marshal(input.Snapshot)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal snapshot: %w", err)
-	}
+CURRENT URL: %s
 
-	userPrompt := fmt.Sprintf(
-		"USER TASK:\n%s\n\nPAGE SNAPSHOT (JSON):\n%s\n\nRemember: respond ONLY with a single JSON object.",
-		input.Task,
-		string(snapshotJSON),
-	)
+PAGE ACCESSIBILITY TREE:
+%s
+`, input.Task, input.CurrentURL, input.DOMTree)
+
+	if len(userMessage) > 60000 {
+		userMessage = userMessage[:60000] + "\n... (truncated)"
+	}
 
 	ctx := context.Background()
 
-	resp, err := c.client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
-		Model: openai.ChatModelGPT4oMini,
-		Messages: []openai.ChatCompletionMessageParamUnion{
-			openai.SystemMessage(systemPrompt),
-			openai.UserMessage(userPrompt),
+	req := openai.ChatCompletionRequest{
+		Model: openai.GPT4oMini,
+		Messages: []openai.ChatCompletionMessage{
+			{
+				Role:    openai.ChatMessageRoleSystem,
+				Content: systemPrompt,
+			},
+			{
+				Role:    openai.ChatMessageRoleUser,
+				Content: userMessage,
+			},
 		},
-	})
+		ResponseFormat: &openai.ChatCompletionResponseFormat{
+			Type: openai.ChatCompletionResponseFormatTypeJSONObject,
+		},
+	}
+
+	resp, err := c.client.CreateChatCompletion(ctx, req)
 	if err != nil {
-		return nil, fmt.Errorf("OpenAI ChatCompletion error: %w", err)
+		return nil, fmt.Errorf("OpenAI error: %w", err)
 	}
 
 	if len(resp.Choices) == 0 {
-		return nil, fmt.Errorf("no choices returned from OpenAI")
+		return nil, fmt.Errorf("no response choices")
 	}
 
 	content := resp.Choices[0].Message.Content
-	if content == "" {
-		return nil, fmt.Errorf("empty content from OpenAI")
+
+	var output DecisionOutput
+	if err := json.Unmarshal([]byte(content), &output); err != nil {
+		return nil, fmt.Errorf("json parse error: %w | content: %s", err, content)
 	}
 
-	var decision DecisionOutput
-	if err := json.Unmarshal([]byte(content), &decision); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal model JSON: %w\nraw: %s", err, content)
-	}
-
-	return &decision, nil
+	return &output, nil
 }
