@@ -3,10 +3,11 @@ package agent
 import (
 	"bufio"
 	"fmt"
-	"github.com/nbenliogludev/go-browser-ai-agent/internal/browser"
-	"github.com/nbenliogludev/go-browser-ai-agent/internal/llm"
 	"os"
 	"strings"
+
+	"github.com/nbenliogludev/go-browser-ai-agent/internal/browser"
+	"github.com/nbenliogludev/go-browser-ai-agent/internal/llm"
 )
 
 type Agent struct {
@@ -57,6 +58,7 @@ func (a *Agent) Run(task string, maxSteps int) error {
 			return fmt.Errorf("failed to execute action: %w", err)
 		}
 
+		// небольшая пауза, чтобы страница успела отреагировать
 		a.browser.Page.WaitForTimeout(1500)
 	}
 
@@ -92,6 +94,12 @@ func (a *Agent) executeWithSecurity(reader *bufio.Reader, snapshot *browser.Page
 			if action.Text == "" {
 				return fmt.Errorf("no text provided for type action")
 			}
+
+			// ✅ Guard: вводим текст только в текстовые поля
+			if target.Tag != "input" && target.Tag != "textarea" {
+				return fmt.Errorf("cannot type into non-text element: tag=%s, selector=%s", target.Tag, target.Selector)
+			}
+
 			fmt.Printf("Выполняю type(%q) в selector=%s\n", action.Text, target.Selector)
 			err := a.browser.Page.Fill(target.Selector, action.Text)
 			return err
