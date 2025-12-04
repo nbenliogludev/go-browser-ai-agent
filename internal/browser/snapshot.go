@@ -33,32 +33,19 @@ func (m *Manager) Snapshot(limit int) (*PageSnapshot, error) {
 	script := `(limit) => {
 		const elements = [];
 		const candidates = Array.from(
-			document.querySelectorAll(
-				'a, button, input, textarea, [role="button"], [role="link"], [role="textbox"]'
-			)
+			document.querySelectorAll('a, button, input, textarea, [role="button"], [role="link"]')
 		);
 
 		for (const el of candidates) {
 			if (elements.length >= limit) break;
 
 			const rect = el.getBoundingClientRect();
-			// пропускаем невидимые элементы
 			if (rect.width === 0 || rect.height === 0) continue;
-
-			const tag = el.tagName.toLowerCase();
-
-			// для input берём только текстовые типы
-			if (tag === 'input') {
-				const type = (el.getAttribute('type') || 'text').toLowerCase();
-				const allowed = ['text', 'search', 'email', 'password', 'url', 'number'];
-				if (!allowed.includes(type)) continue;
-			}
 
 			const text = (el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || '').trim();
 			if (!text) continue;
 
-			// базовый селектор: tag + id/class
-			let selector = tag;
+			let selector = el.tagName.toLowerCase();
 			if (el.id) {
 				selector += '#' + el.id;
 			} else if (el.className && typeof el.className === 'string') {
@@ -68,15 +55,9 @@ func (m *Manager) Snapshot(limit int) (*PageSnapshot, error) {
 				}
 			}
 
-			// роль: либо из атрибута, либо textbox для input/textarea
-			let role = el.getAttribute('role') || '';
-			if (!role && (tag === 'input' || tag === 'textarea')) {
-				role = 'textbox';
-			}
-
 			elements.push({
-				tag,
-				role,
+				tag: el.tagName.toLowerCase(),
+				role: el.getAttribute('role') || '',
 				text,
 				selector,
 			});
@@ -128,4 +109,53 @@ func strFromMap(m map[string]interface{}, key string) string {
 		}
 	}
 	return ""
+}
+
+func (m *Manager) ReadContent(selector string, maxChars int) (string, error) {
+	if m == nil || m.Page == nil {
+		return "", fmt.Errorf("page is not initialized")
+	}
+	if selector == "" {
+		return "", fmt.Errorf("empty selector for ReadContent")
+	}
+	if maxChars <= 0 {
+		maxChars = 2000
+	}
+
+	script := `(selector, maxChars) => {
+		const normalize = (txt) => (txt || "").replace(/\s+/g, " ").trim();
+
+		let el = document.querySelector(selector);
+		if (!el) return "";
+
+		let bestText = normalize(el.innerText || el.textContent);
+
+		// Если текста мало – пробуем подняться по DOM и взять более крупный блок.
+		let parent = el.parentElement;
+		while (parent && bestText.length < maxChars) {
+			const parentText = normalize(parent.innerText || parent.textContent);
+			// Берем более длинный и содержательный текст.
+			if (parentText.length > bestText.length) {
+				bestText = parentText;
+			}
+			parent = parent.parentElement;
+		}
+
+		if (bestText.length > maxChars) {
+			return bestText.slice(0, maxChars);
+		}
+		return bestText;
+	}`
+
+	raw, err := m.Page.Evaluate(script, selector, maxChars)
+	if err != nil {
+		return "", fmt.Errorf("could not evaluate content extraction script: %w", err)
+	}
+
+	text, ok := raw.(string)
+	if !ok {
+		return "", fmt.Errorf("unexpected JS result type for content: %T", raw)
+	}
+
+	return text, nil
 }
