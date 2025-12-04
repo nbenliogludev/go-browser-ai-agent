@@ -4,158 +4,129 @@ import (
 	"fmt"
 )
 
-type ElementInfo struct {
-	ID       string `json:"id"`
-	Tag      string `json:"tag"`
-	Role     string `json:"role"`
-	Text     string `json:"text"`
-	Selector string `json:"selector"`
-}
-
 type PageSnapshot struct {
-	URL      string        `json:"url"`
-	Title    string        `json:"title"`
-	Elements []ElementInfo `json:"elements"`
+	URL   string
+	Title string
+	Tree  string
 }
 
-func (m *Manager) Snapshot(limit int) (*PageSnapshot, error) {
+// Snapshot выполняет JS на странице, размечает элементы ID-шниками и возвращает дерево.
+func (m *Manager) Snapshot() (*PageSnapshot, error) {
 	if m == nil || m.Page == nil {
 		return nil, fmt.Errorf("page is not initialized")
 	}
 
-	url := m.Page.URL()
+	// ИСПРАВЛЕНИЕ:
+	// В JS коде ниже мы заменили `${var}` на конкатенацию `+ var +`,
+	// чтобы избежать конфликтов с Go raw strings.
 
-	title, err := m.Page.Title()
-	if err != nil {
-		return nil, fmt.Errorf("could not get page title: %w", err)
-	}
+	script := `() => {
+		let idCounter = 1;
+		const interactiveTags = new Set(['a', 'button', 'input', 'textarea', 'select', 'details', 'summary']);
+		
+		function isInteractive(el) {
+			const tag = el.tagName.toLowerCase();
+			const role = el.getAttribute('role');
+			const tabIndex = el.getAttribute('tabindex');
+			
+			return interactiveTags.has(tag) || 
+				   role === 'button' || 
+				   role === 'link' || 
+				   role === 'checkbox' ||
+				   role === 'menuitem' ||
+				   role === 'tab' ||
+				   role === 'textbox' ||
+				   (tabIndex !== null && tabIndex !== '-1') ||
+				   el.onclick != null;
+		}
 
-	script := `(limit) => {
-		const elements = [];
-		const candidates = Array.from(
-			document.querySelectorAll('a, button, input, textarea, [role="button"], [role="link"]')
-		);
-
-		for (const el of candidates) {
-			if (elements.length >= limit) break;
-
+		function isVisible(el) {
+			if (!el.getBoundingClientRect) return false;
 			const rect = el.getBoundingClientRect();
-			if (rect.width === 0 || rect.height === 0) continue;
+			const style = window.getComputedStyle(el);
+			return rect.width > 0 && rect.height > 0 && 
+				   style.visibility !== 'hidden' && 
+				   style.display !== 'none';
+		}
 
-			const text = (el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || '').trim();
-			if (!text) continue;
+		function cleanText(text) {
+			return (text || '').replace(/\s+/g, ' ').trim();
+		}
 
-			let selector = el.tagName.toLowerCase();
-			if (el.id) {
-				selector += '#' + el.id;
-			} else if (el.className && typeof el.className === 'string') {
-				const cls = el.className.split(/\s+/).filter(Boolean)[0];
-				if (cls) {
-					selector += '.' + cls;
+		function traverse(node, depth) {
+			if (!node) return '';
+			
+			// Обработка текстовых узлов
+			if (node.nodeType === Node.TEXT_NODE) {
+				const text = cleanText(node.textContent);
+				if (text.length > 0) {
+					return '  '.repeat(depth) + text + '\n';
 				}
+				return '';
 			}
 
-			elements.push({
-				tag: el.tagName.toLowerCase(),
-				role: el.getAttribute('role') || '',
-				text,
-				selector,
-			});
+			// Обработка элементов
+			if (node.nodeType === Node.ELEMENT_NODE) {
+				const el = node;
+				if (!isVisible(el)) return '';
+
+				let output = '';
+				let prefix = '  '.repeat(depth);
+				const tag = el.tagName.toLowerCase();
+				
+				if (isInteractive(el)) {
+					const aiId = idCounter++;
+					el.setAttribute('data-ai-id', aiId);
+					
+					let extra = '';
+					if (tag === 'input' || tag === 'textarea') {
+						extra = ' value="' + (el.value || '') + '" placeholder="' + (el.getAttribute('placeholder') || '') + '"';
+					}
+					if (tag === 'a') {
+						extra = ' href="..."'; 
+					}
+
+					// !!! ЗДЕСЬ БЫЛА ОШИБКА: заменяем '${...}' на конкатенацию !!!
+					output += prefix + '[' + aiId + '] <' + tag + extra + '>\n';
+				} else {
+					// Опционально: можно выводить структурные теги, если нужно
+				}
+
+				// Рекурсия по детям
+				for (const child of el.childNodes) {
+					output += traverse(child, depth + 1);
+				}
+				
+				return output;
+			}
+			return '';
 		}
 
-		return elements;
+		// Чистим старые ID
+		document.querySelectorAll('[data-ai-id]').forEach(el => el.removeAttribute('data-ai-id'));
+
+		return traverse(document.body, 0);
 	}`
 
-	raw, err := m.Page.Evaluate(script, limit)
+	result, err := m.Page.Evaluate(script)
 	if err != nil {
-		return nil, fmt.Errorf("could not evaluate DOM extraction script: %w", err)
+		return nil, fmt.Errorf("js evaluation failed: %w", err)
 	}
 
-	rawSlice, ok := raw.([]interface{})
+	treeStr, ok := result.(string)
 	if !ok {
-		return nil, fmt.Errorf("unexpected JS result type: %T", raw)
+		return nil, fmt.Errorf("expected string from js, got %T", result)
 	}
 
-	elements := make([]ElementInfo, 0, len(rawSlice))
-
-	for i, item := range rawSlice {
-		obj, ok := item.(map[string]interface{})
-		if !ok {
-			continue
-		}
-
-		el := ElementInfo{
-			ID:       fmt.Sprintf("el_%d", i),
-			Tag:      strFromMap(obj, "tag"),
-			Role:     strFromMap(obj, "role"),
-			Text:     strFromMap(obj, "text"),
-			Selector: strFromMap(obj, "selector"),
-		}
-
-		elements = append(elements, el)
-	}
+	title, _ := m.Page.Title()
 
 	return &PageSnapshot{
-		URL:      url,
-		Title:    title,
-		Elements: elements,
+		URL:   m.Page.URL(),
+		Title: title,
+		Tree:  treeStr,
 	}, nil
 }
 
-func strFromMap(m map[string]interface{}, key string) string {
-	if v, ok := m[key]; ok {
-		if s, ok := v.(string); ok {
-			return s
-		}
-	}
-	return ""
-}
-
-func (m *Manager) ReadContent(selector string, maxChars int) (string, error) {
-	if m == nil || m.Page == nil {
-		return "", fmt.Errorf("page is not initialized")
-	}
-	if selector == "" {
-		return "", fmt.Errorf("empty selector for ReadContent")
-	}
-	if maxChars <= 0 {
-		maxChars = 2000
-	}
-
-	script := `(selector, maxChars) => {
-		const normalize = (txt) => (txt || "").replace(/\s+/g, " ").trim();
-
-		let el = document.querySelector(selector);
-		if (!el) return "";
-
-		let bestText = normalize(el.innerText || el.textContent);
-
-		// Если текста мало – пробуем подняться по DOM и взять более крупный блок.
-		let parent = el.parentElement;
-		while (parent && bestText.length < maxChars) {
-			const parentText = normalize(parent.innerText || parent.textContent);
-			// Берем более длинный и содержательный текст.
-			if (parentText.length > bestText.length) {
-				bestText = parentText;
-			}
-			parent = parent.parentElement;
-		}
-
-		if (bestText.length > maxChars) {
-			return bestText.slice(0, maxChars);
-		}
-		return bestText;
-	}`
-
-	raw, err := m.Page.Evaluate(script, selector, maxChars)
-	if err != nil {
-		return "", fmt.Errorf("could not evaluate content extraction script: %w", err)
-	}
-
-	text, ok := raw.(string)
-	if !ok {
-		return "", fmt.Errorf("unexpected JS result type for content: %T", raw)
-	}
-
-	return text, nil
+func (m *Manager) GetSelectorForID(id int) string {
+	return fmt.Sprintf("[data-ai-id='%d']", id)
 }

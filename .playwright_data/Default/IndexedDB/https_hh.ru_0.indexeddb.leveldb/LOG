@@ -1,0 +1,14 @@
+2025/12/05-01:46:46.639 a22db Reusing MANIFEST /Users/nikolay/GolandProjects/go-browser-ai-agent/.playwright_data/Default/IndexedDB/https_hh.ru_0.indexeddb.leveldb/MANIFEST-000001
+2025/12/05-01:46:46.640 a22db Recovering log #30
+2025/12/05-01:46:46.640 a22db Reusing old log /Users/nikolay/GolandProjects/go-browser-ai-agent/.playwright_data/Default/IndexedDB/https_hh.ru_0.indexeddb.leveldb/000030.log 
+2025/12/05-01:46:46.640 a22db Delete type=2 #28
+2025/12/05-01:46:46.723 a22db Level-0 table #35: started
+2025/12/05-01:46:46.724 a22db Level-0 table #35: 1397 bytes OK
+2025/12/05-01:46:46.725 a22db Delete type=0 #30
+2025/12/05-01:46:46.725 a22db Manual compaction at level-0 from '\x00\x0e\x00\x00\x00' @ 72057594037927935 : 1 .. '\x00\x0f\x00\x00\x00' @ 0 : 0; will stop at '\x00\x0e\x01\x03\x03\x00\x00\x00\x00\x00\x00\xf0?' @ 1147 : 1
+2025/12/05-01:46:46.725 a22db Compacting 1@0 + 1@1 files
+2025/12/05-01:46:46.727 a22db Generated table #36@0: 34 keys, 866 bytes
+2025/12/05-01:46:46.727 a22db Compacted 1@0 + 1@1 files => 866 bytes
+2025/12/05-01:46:46.731 a22db compacted to: files[ 0 1 1 0 0 0 0 ]
+2025/12/05-01:46:46.731 a22db Delete type=2 #35
+2025/12/05-01:46:46.731 a22db Manual compaction at level-0 from '\x00\x0e\x01\x03\x03\x00\x00\x00\x00\x00\x00\xf0?' @ 1147 : 1 .. '\x00\x0f\x00\x00\x00' @ 0 : 0; will stop at (end)
