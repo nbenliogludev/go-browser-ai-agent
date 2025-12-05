@@ -21,12 +21,11 @@ type Manager struct {
 }
 
 func NewManager() (*Manager, error) {
-	// 1. Сначала устанавливаем драйверы
+	// 1. Install drivers
 	if err := playwright.Install(); err != nil {
 		return nil, fmt.Errorf("install pw failed: %w", err)
 	}
 
-	// 2. Запускаем движок Playwright
 	pw, err := playwright.Run()
 	if err != nil {
 		return nil, fmt.Errorf("start pw failed: %w", err)
@@ -37,9 +36,11 @@ func NewManager() (*Manager, error) {
 
 	context, err := pw.Chromium.LaunchPersistentContext(userDataDir, playwright.BrowserTypeLaunchPersistentContextOptions{
 		Headless: playwright.Bool(false),
-		Viewport: &playwright.Size{Width: 1280, Height: 720},
+		Viewport: nil, // Оставляем nil, но переопределим ниже вручную
 		Args: []string{
-			"--disable-blink-features=AutomationControlled", // Попытка скрыть автоматизацию
+			"--start-maximized",
+			"--window-position=0,0",
+			"--disable-blink-features=AutomationControlled",
 		},
 	})
 	if err != nil {
@@ -47,19 +48,26 @@ func NewManager() (*Manager, error) {
 		return nil, err
 	}
 
-	// 4. Получаем страницу ИЗ созданного контекста
+	// 4. Get or Create Page
 	var page playwright.Page
 	pages := context.Pages()
 	if len(pages) > 0 {
 		page = pages[0]
 	} else {
-		// Если страниц нет, создаем новую
 		page, err = context.NewPage()
 		if err != nil {
 			context.Close()
 			pw.Stop()
 			return nil, fmt.Errorf("failed to create page: %w", err)
 		}
+	}
+
+	if _, err := page.Evaluate("window.moveTo(0, 0); window.resizeTo(screen.availWidth, screen.availHeight);"); err != nil {
+		fmt.Printf("Warning: failed to resize window via JS: %v\n", err)
+	}
+
+	if err := page.SetViewportSize(1640, 1080); err != nil {
+		fmt.Printf("Warning: failed to set viewport size: %v\n", err)
 	}
 
 	page.SetDefaultTimeout(60000)
