@@ -10,15 +10,10 @@ type PageSnapshot struct {
 	Tree  string
 }
 
-// Snapshot выполняет JS на странице, размечает элементы ID-шниками и возвращает дерево.
 func (m *Manager) Snapshot() (*PageSnapshot, error) {
 	if m == nil || m.Page == nil {
 		return nil, fmt.Errorf("page is not initialized")
 	}
-
-	// ИСПРАВЛЕНИЕ:
-	// В JS коде ниже мы заменили `${var}` на конкатенацию `+ var +`,
-	// чтобы избежать конфликтов с Go raw strings.
 
 	script := `() => {
 		let idCounter = 1;
@@ -56,7 +51,7 @@ func (m *Manager) Snapshot() (*PageSnapshot, error) {
 		function traverse(node, depth) {
 			if (!node) return '';
 			
-			// Обработка текстовых узлов
+			// Текст
 			if (node.nodeType === Node.TEXT_NODE) {
 				const text = cleanText(node.textContent);
 				if (text.length > 0) {
@@ -65,7 +60,7 @@ func (m *Manager) Snapshot() (*PageSnapshot, error) {
 				return '';
 			}
 
-			// Обработка элементов
+			// Элементы
 			if (node.nodeType === Node.ELEMENT_NODE) {
 				const el = node;
 				if (!isVisible(el)) return '';
@@ -74,6 +69,7 @@ func (m *Manager) Snapshot() (*PageSnapshot, error) {
 				let prefix = '  '.repeat(depth);
 				const tag = el.tagName.toLowerCase();
 				
+				// Обработка интерактивных элементов
 				if (isInteractive(el)) {
 					const aiId = idCounter++;
 					el.setAttribute('data-ai-id', aiId);
@@ -82,17 +78,21 @@ func (m *Manager) Snapshot() (*PageSnapshot, error) {
 					if (tag === 'input' || tag === 'textarea') {
 						extra = ' value="' + (el.value || '') + '" placeholder="' + (el.getAttribute('placeholder') || '') + '"';
 					}
+					// Не скрываем href, он может помочь ИИ понять контекст (например /resume/...)
 					if (tag === 'a') {
-						extra = ' href="..."'; 
+						const href = el.getAttribute('href');
+						if (href) extra = ' href="' + (href.length > 50 ? '...' : href) + '"';
 					}
 
-					// !!! ЗДЕСЬ БЫЛА ОШИБКА: заменяем '${...}' на конкатенацию !!!
 					output += prefix + '[' + aiId + '] <' + tag + extra + '>\n';
 				} else {
-					// Опционально: можно выводить структурные теги, если нужно
+					// ВАЖНО: Выводим заголовки, чтобы ИИ видел структуру (например, "Мои резюме")
+					if (['h1','h2','h3','h4','h5'].includes(tag)) {
+						output += prefix + '<' + tag + '>\n';
+					}
 				}
 
-				// Рекурсия по детям
+				// Рекурсия
 				for (const child of el.childNodes) {
 					output += traverse(child, depth + 1);
 				}
@@ -102,7 +102,6 @@ func (m *Manager) Snapshot() (*PageSnapshot, error) {
 			return '';
 		}
 
-		// Чистим старые ID
 		document.querySelectorAll('[data-ai-id]').forEach(el => el.removeAttribute('data-ai-id'));
 
 		return traverse(document.body, 0);
@@ -125,8 +124,4 @@ func (m *Manager) Snapshot() (*PageSnapshot, error) {
 		Title: title,
 		Tree:  treeStr,
 	}, nil
-}
-
-func (m *Manager) GetSelectorForID(id int) string {
-	return fmt.Sprintf("[data-ai-id='%d']", id)
 }
