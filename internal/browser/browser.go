@@ -8,7 +8,6 @@ import (
 	"github.com/playwright-community/playwright-go"
 )
 
-// Константы для load state
 const (
 	LoadStateLoad             = "load"
 	LoadStateDomcontentloaded = "domcontentloaded"
@@ -22,11 +21,12 @@ type Manager struct {
 }
 
 func NewManager() (*Manager, error) {
-	// Автоустановка драйверов
+	// 1. Сначала устанавливаем драйверы
 	if err := playwright.Install(); err != nil {
 		return nil, fmt.Errorf("install pw failed: %w", err)
 	}
 
+	// 2. Запускаем движок Playwright
 	pw, err := playwright.Run()
 	if err != nil {
 		return nil, fmt.Errorf("start pw failed: %w", err)
@@ -35,7 +35,6 @@ func NewManager() (*Manager, error) {
 	userDataDir, _ := os.Getwd()
 	userDataDir = filepath.Join(userDataDir, ".playwright_data")
 
-	// Запускаем с Headless: false, чтобы вы видели браузер
 	context, err := pw.Chromium.LaunchPersistentContext(userDataDir, playwright.BrowserTypeLaunchPersistentContextOptions{
 		Headless: playwright.Bool(false),
 		Viewport: &playwright.Size{Width: 1280, Height: 720},
@@ -48,9 +47,23 @@ func NewManager() (*Manager, error) {
 		return nil, err
 	}
 
-	page := context.Pages()[0]
-	// Увеличим таймаут
-	page.SetDefaultTimeout(10000)
+	// 4. Получаем страницу ИЗ созданного контекста
+	var page playwright.Page
+	pages := context.Pages()
+	if len(pages) > 0 {
+		page = pages[0]
+	} else {
+		// Если страниц нет, создаем новую
+		page, err = context.NewPage()
+		if err != nil {
+			context.Close()
+			pw.Stop()
+			return nil, fmt.Errorf("failed to create page: %w", err)
+		}
+	}
+
+	page.SetDefaultTimeout(60000)
+	page.SetDefaultNavigationTimeout(60000)
 
 	return &Manager{
 		pw:      pw,
