@@ -16,6 +16,7 @@ vendor/
 
 # Playwright user data (persistent sessions, cache)
 .playwright-user-data/
+.playwright_data/
 
 # Logs
 *.log
