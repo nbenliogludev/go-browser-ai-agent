@@ -28,16 +28,14 @@ func (a *Agent) Run(task string, maxSteps int) error {
 	for step := 1; step <= maxSteps; step++ {
 		fmt.Printf("\n--- STEP %d ---\n", step)
 
-		// ИСПРАВЛЕНИЕ:
-		// Мы явно создаем переменную типа playwright.LoadState из строки.
-		// Это устраняет путаницу с типами констант и указателей.
-		networkIdle := playwright.LoadState("networkidle")
-
+		// 1. Ждем стабилизации сети
+		// FIX: Явно создаем переменную типа LoadState из строки "networkidle"
+		state := playwright.LoadState("networkidle")
 		a.browser.Page.WaitForLoadState(playwright.PageWaitForLoadStateOptions{
-			State: &networkIdle, // Теперь это гарантированно *LoadState
+			State: &state, // Теперь передаем корректный указатель *LoadState
 		})
 
-		// Снимаем снимок
+		// 2. Делаем снимок
 		snapshot, err := a.browser.Snapshot()
 		if err != nil {
 			return fmt.Errorf("snapshot failed: %w", err)
@@ -45,14 +43,14 @@ func (a *Agent) Run(task string, maxSteps int) error {
 
 		fmt.Printf("URL: %s\nTitle: %s\n", snapshot.URL, snapshot.Title)
 
-		// Для отладки
+		// Показываем превью дерева
 		preview := snapshot.Tree
 		if len(preview) > 500 {
 			preview = preview[:500] + "..."
 		}
 		fmt.Printf("Tree preview:\n%s\n", preview)
 
-		// 2. Спрашиваем LLM
+		// 3. Спрашиваем LLM
 		decision, err := a.llm.DecideAction(llm.DecisionInput{
 			Task:       task,
 			DOMTree:    snapshot.Tree,
@@ -70,13 +68,12 @@ func (a *Agent) Run(task string, maxSteps int) error {
 			return nil
 		}
 
-		// 3. Выполняем действие
+		// 4. Выполняем действие
 		if err := a.executeAction(reader, decision.Action); err != nil {
 			log.Printf("Action failed: %v. Retrying...", err)
-			// Не выходим, даем LLM шанс исправиться
 		}
 
-		// Пауза
+		// Пауза между шагами
 		time.Sleep(2 * time.Second)
 	}
 
@@ -84,8 +81,13 @@ func (a *Agent) Run(task string, maxSteps int) error {
 }
 
 func (a *Agent) executeAction(reader *bufio.Reader, action llm.Action) error {
-	// Получаем селектор по ID
 	selector := fmt.Sprintf("[data-ai-id='%d']", action.TargetID)
+
+	if action.Type == llm.ActionClick || action.Type == llm.ActionTypeInput {
+		a.highlight(selector)
+		// Небольшая пауза, чтобы вы успели увидеть подсветку
+		time.Sleep(500 * time.Millisecond)
+	}
 
 	switch action.Type {
 	case llm.ActionClick:
@@ -97,13 +99,9 @@ func (a *Agent) executeAction(reader *bufio.Reader, action llm.Action) error {
 
 	case llm.ActionTypeInput:
 		fmt.Printf("Typing '%s' into %s (Submit=%v)...\n", action.Text, selector, action.Submit)
-
-		// 1. Очищаем и вводим текст
 		if err := a.browser.Page.Fill(selector, action.Text); err != nil {
 			return err
 		}
-
-		// 2. Если флаг Submit=true, жмем Enter
 		if action.Submit {
 			fmt.Println("👉 Pressing ENTER...")
 			return a.browser.Page.Press(selector, "Enter")
@@ -111,7 +109,6 @@ func (a *Agent) executeAction(reader *bufio.Reader, action llm.Action) error {
 		return nil
 
 	case llm.ActionNavigate:
-		// ... (без изменений)
 		fmt.Printf("Navigating to %s...\n", action.URL)
 		_, err := a.browser.Page.Goto(action.URL)
 		return err
@@ -122,6 +119,18 @@ func (a *Agent) executeAction(reader *bufio.Reader, action llm.Action) error {
 	default:
 		return fmt.Errorf("unknown action type: %s", action.Type)
 	}
+}
+
+func (a *Agent) highlight(selector string) {
+	script := fmt.Sprintf(`
+		const el = document.querySelector("%s");
+		if (el) {
+			el.style.outline = "5px solid red";
+			el.style.zIndex = "999999";
+			el.scrollIntoView({behavior: "smooth", block: "center", inline: "center"});
+		}
+	`, selector)
+	_, _ = a.browser.Page.Evaluate(script)
 }
 
 func askConfirmation(reader *bufio.Reader, msg string) bool {
