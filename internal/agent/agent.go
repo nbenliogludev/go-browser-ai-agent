@@ -25,17 +25,16 @@ func NewAgent(b *browser.Manager, c llm.Client) *Agent {
 func (a *Agent) Run(task string, maxSteps int) error {
 	reader := bufio.NewReader(os.Stdin)
 
+	history := make([]string, 0, maxSteps)
+
 	for step := 1; step <= maxSteps; step++ {
 		fmt.Printf("\n--- STEP %d ---\n", step)
 
-		// 1. Ждем стабилизации сети
-		// FIX: Явно создаем переменную типа LoadState из строки "networkidle"
 		state := playwright.LoadState("networkidle")
 		a.browser.Page.WaitForLoadState(playwright.PageWaitForLoadStateOptions{
-			State: &state, // Теперь передаем корректный указатель *LoadState
+			State: &state,
 		})
 
-		// 2. Делаем снимок
 		snapshot, err := a.browser.Snapshot()
 		if err != nil {
 			return fmt.Errorf("snapshot failed: %w", err)
@@ -43,37 +42,46 @@ func (a *Agent) Run(task string, maxSteps int) error {
 
 		fmt.Printf("URL: %s\nTitle: %s\n", snapshot.URL, snapshot.Title)
 
-		// Показываем превью дерева
 		preview := snapshot.Tree
 		if len(preview) > 500 {
 			preview = preview[:500] + "..."
 		}
 		fmt.Printf("Tree preview:\n%s\n", preview)
 
-		// 3. Спрашиваем LLM
+		histStr := strings.Join(history, "\n")
+
 		decision, err := a.llm.DecideAction(llm.DecisionInput{
 			Task:       task,
 			DOMTree:    snapshot.Tree,
 			CurrentURL: snapshot.URL,
+			History:    histStr,
 		})
 		if err != nil {
 			return fmt.Errorf("llm error: %w", err)
 		}
 
 		fmt.Printf("\n🤖 THOUGHT: %s\n", decision.Thought)
-		fmt.Printf("⚡ ACTION: %s [%d] %q\n", decision.Action.Type, decision.Action.TargetID, decision.Action.Text)
+		fmt.Printf("⚡ ACTION: %s [%d] %q\n",
+			decision.Action.Type, decision.Action.TargetID, decision.Action.Text)
 
 		if decision.Action.Type == llm.ActionFinish {
 			fmt.Println("✅ Task completed!")
 			return nil
 		}
 
-		// 4. Выполняем действие
 		if err := a.executeAction(reader, decision.Action); err != nil {
 			log.Printf("Action failed: %v. Retrying...", err)
+		} else {
+			summary := fmt.Sprintf(
+				"step=%d url=%s action=%s target=%d text=%q",
+				step, snapshot.URL, decision.Action.Type, decision.Action.TargetID, decision.Action.Text,
+			)
+			history = append(history, summary)
+			if len(history) > 5 {
+				history = history[len(history)-5:]
+			}
 		}
 
-		// Пауза между шагами
 		time.Sleep(2 * time.Second)
 	}
 
@@ -81,11 +89,39 @@ func (a *Agent) Run(task string, maxSteps int) error {
 }
 
 func (a *Agent) executeAction(reader *bufio.Reader, action llm.Action) error {
+	// навигацию по URL не делаем вообще
+	if action.Type == llm.ActionNavigate {
+		fmt.Println("⚠ navigate action is disabled, ignoring (navigation must be via clicks).")
+		return nil
+	}
+
 	selector := fmt.Sprintf("[data-ai-id='%d']", action.TargetID)
+
+	// немного дебага — по какому элементу идём кликать/печатать
+	if action.Type == llm.ActionClick || action.Type == llm.ActionTypeInput {
+		htmlAny, _ := a.browser.Page.Evaluate(
+			`(sel) => {
+				const el = document.querySelector(sel);
+				if (!el) return null;
+				let s = el.outerHTML || "";
+				if (s.length > 400) s = s.slice(0, 400) + "...";
+				return s;
+			}`,
+			selector,
+		)
+		if htmlAny != nil {
+			if htmlStr, ok := htmlAny.(string); ok && htmlStr != "" {
+				fmt.Printf("🔍 DEBUG element for %s:\n%s\n", selector, htmlStr)
+			} else {
+				fmt.Printf("🔍 DEBUG element for %s: <nil or non-string>\n", selector)
+			}
+		} else {
+			fmt.Printf("🔍 DEBUG element for %s: not found\n", selector)
+		}
+	}
 
 	if action.Type == llm.ActionClick || action.Type == llm.ActionTypeInput {
 		a.highlight(selector)
-		// Небольшая пауза, чтобы вы успели увидеть подсветку
 		time.Sleep(500 * time.Millisecond)
 	}
 
@@ -107,11 +143,6 @@ func (a *Agent) executeAction(reader *bufio.Reader, action llm.Action) error {
 			return a.browser.Page.Press(selector, "Enter")
 		}
 		return nil
-
-	case llm.ActionNavigate:
-		fmt.Printf("Navigating to %s...\n", action.URL)
-		_, err := a.browser.Page.Goto(action.URL)
-		return err
 
 	case llm.ActionFinish:
 		return nil

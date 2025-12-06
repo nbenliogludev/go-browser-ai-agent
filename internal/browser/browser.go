@@ -21,7 +21,6 @@ type Manager struct {
 }
 
 func NewManager() (*Manager, error) {
-	// 1. Install drivers
 	if err := playwright.Install(); err != nil {
 		return nil, fmt.Errorf("install pw failed: %w", err)
 	}
@@ -34,21 +33,23 @@ func NewManager() (*Manager, error) {
 	userDataDir, _ := os.Getwd()
 	userDataDir = filepath.Join(userDataDir, ".playwright_data")
 
-	context, err := pw.Chromium.LaunchPersistentContext(userDataDir, playwright.BrowserTypeLaunchPersistentContextOptions{
-		Headless: playwright.Bool(false),
-		Viewport: nil, // Оставляем nil, но переопределим ниже вручную
-		Args: []string{
-			"--start-maximized",
-			"--window-position=0,0",
-			"--disable-blink-features=AutomationControlled",
+	context, err := pw.Chromium.LaunchPersistentContext(
+		userDataDir,
+		playwright.BrowserTypeLaunchPersistentContextOptions{
+			Headless: playwright.Bool(false),
+			Viewport: nil,
+			Args: []string{
+				"--start-maximized",
+				"--window-position=0,0",
+				"--disable-blink-features=AutomationControlled",
+			},
 		},
-	})
+	)
 	if err != nil {
 		pw.Stop()
 		return nil, err
 	}
 
-	// 4. Get or Create Page
 	var page playwright.Page
 	pages := context.Pages()
 	if len(pages) > 0 {
@@ -62,7 +63,7 @@ func NewManager() (*Manager, error) {
 		}
 	}
 
-	if _, err := page.Evaluate("window.moveTo(0, 0); window.resizeTo(screen.availWidth, screen.availHeight);"); err != nil {
+	if _, err := page.Evaluate(`window.moveTo(0, 0); window.resizeTo(screen.availWidth, screen.availHeight);`); err != nil {
 		fmt.Printf("Warning: failed to resize window via JS: %v\n", err)
 	}
 
@@ -82,9 +83,9 @@ func NewManager() (*Manager, error) {
 
 func (m *Manager) Close() {
 	if m.Context != nil {
-		m.Context.Close()
+		_ = m.Context.Close()
 	}
 	if m.pw != nil {
-		m.pw.Stop()
+		_ = m.pw.Stop()
 	}
 }
