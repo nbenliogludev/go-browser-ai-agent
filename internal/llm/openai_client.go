@@ -93,8 +93,19 @@ GUIDELINES:
 
 4) Avoid loops
    - Do not repeat the exact same click / type on the same page if it didn't change anything.
+   - Do NOT repeatedly execute the same short pattern of actions (for example, opening
+     the same card and pressing the same primary button again and again).
+   - If the history contains "SYSTEM NOTE" lines about loops or forbidden actions/patterns,
+     you MUST obey them: do NOT repeat such actions or patterns.
    - If after several reasonable attempts the flow clearly requires human actions
      (e.g. complex payment), use "finish" and explain the situation in the thought.
+
+HISTORY MAY CONTAIN SYSTEM NOTES:
+- Some history lines may start with "SYSTEM NOTE:".
+- These are constraints from the environment (for example, detected loops).
+- You MUST treat them as hard constraints: avoid repeating forbidden actions or patterns
+  and prefer choosing a different path or finish if the user goal already looks achieved
+  (for example, the cart clearly shows the desired item and quantity).
 
 Remember: no direct URL navigation. Everything is done via clicks and typing based on the DOM tree only.
 `

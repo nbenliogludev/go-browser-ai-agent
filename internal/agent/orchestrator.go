@@ -36,6 +36,10 @@ func (o *Orchestrator) Run(task string, maxSteps int) error {
 	reader := bufio.NewReader(os.Stdin)
 	ctx := context.Background()
 
+	// Общая память шагов для обоих под-агентов:
+	// история + защита от циклов и паттернов.
+	mem := NewStepMemory(10, 3)
+
 	// 0. План
 	plan, err := o.planner.BuildPlan(ctx, task)
 	if err != nil {
@@ -47,7 +51,6 @@ func (o *Orchestrator) Run(task string, maxSteps int) error {
 		fmt.Printf("  %d. [%s] %s\n", s.Index, s.Mode, s.Goal)
 	}
 
-	history := make([]string, 0, maxSteps)
 	currentPlanStep := 0
 
 	for step := 1; step <= maxSteps; step++ {
@@ -91,7 +94,7 @@ func (o *Orchestrator) Run(task string, maxSteps int) error {
 			CurrentStep: currentPlanStep,
 			URL:         snapshot.URL,
 			DOMTree:     snapshot.Tree,
-			History:     history,
+			History:     mem.HistoryLines(),
 		}
 
 		var subAgent SubAgent
@@ -113,6 +116,18 @@ func (o *Orchestrator) Run(task string, maxSteps int) error {
 		fmt.Printf("⚡ ACTION: %s [%d] %q\n",
 			action.Type, action.TargetID, action.Text)
 
+		// Жёсткая защита от цикла (в том числе по паттернам действий)
+		if blocked, reason := mem.ShouldBlock(snapshot.URL, *action); blocked {
+			fmt.Printf("⛔ LOOP GUARD: suppressing action %s on target %d\n",
+				action.Type, action.TargetID)
+			if reason != "" {
+				fmt.Println(reason)
+				mem.AddSystemNote(reason)
+			}
+			time.Sleep(1 * time.Second)
+			continue
+		}
+
 		if action.Type == llm.ActionFinish {
 			fmt.Println("✅ Sub-agent requested finish.")
 			return nil
@@ -121,14 +136,7 @@ func (o *Orchestrator) Run(task string, maxSteps int) error {
 		if err := o.executeAction(reader, *action); err != nil {
 			log.Printf("Action failed: %v", err)
 		} else {
-			summary := fmt.Sprintf(
-				"step=%d planStep=%d mode=%s url=%s action=%s target=%d text=%q",
-				step, stepGoal.Index, mode, snapshot.URL, action.Type, action.TargetID, action.Text,
-			)
-			history = append(history, summary)
-			if len(history) > 5 {
-				history = history[len(history)-5:]
-			}
+			mem.Add(step, snapshot.URL, *action)
 
 			// Простая эвристика завершения шага
 			if mode == planner.ModeNavigation {
