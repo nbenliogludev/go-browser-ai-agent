@@ -7,6 +7,7 @@ import (
 	"os"
 
 	openai "github.com/sashabaranov/go-openai"
+	"github.com/sashabaranov/go-openai/jsonschema"
 )
 
 type OpenAIClient struct {
@@ -20,6 +21,49 @@ func NewOpenAIClient() (*OpenAIClient, error) {
 	}
 	client := openai.NewClient(apiKey)
 	return &OpenAIClient{client: client}, nil
+}
+
+// Tool description for choosing the next browser-agent action.
+var browserActionTool = openai.Tool{
+	Type: openai.ToolTypeFunction,
+	Function: &openai.FunctionDefinition{
+		Name:        "decide_browser_action",
+		Description: "Chooses the NEXT action of the browser agent based on the user task, page DOM tree, and step history.",
+		Parameters: jsonschema.Definition{
+			Type: jsonschema.Object,
+			Properties: map[string]jsonschema.Definition{
+				"thought": {
+					Type:        jsonschema.String,
+					Description: "A short explanation of why this action is chosen for the current step.",
+				},
+				"action": {
+					Type:        jsonschema.Object,
+					Description: "Description of the next agent action.",
+					Properties: map[string]jsonschema.Definition{
+						"type": {
+							Type:        jsonschema.String,
+							Enum:        []string{"click", "type", "finish"},
+							Description: "Action type: click, type, or finish.",
+						},
+						"target_id": {
+							Type:        jsonschema.Integer,
+							Description: "Target element id from the DOM tree for click/type.",
+						},
+						"text": {
+							Type:        jsonschema.String,
+							Description: "Text to type (only for type).",
+						},
+						"submit": {
+							Type:        jsonschema.Boolean,
+							Description: "If true, press Enter after typing.",
+						},
+					},
+					Required: []string{"type"},
+				},
+			},
+			Required: []string{"thought", "action"},
+		},
+	},
 }
 
 const systemPrompt = `
@@ -56,17 +100,10 @@ You ONLY have these action types:
 - "type"   — type text into an input/textarea by id (optionally press Enter).
 - "finish" — stop when the task is reasonably completed or cannot be completed automatically.
 
-RESPONSE FORMAT (STRICT):
-Return a SINGLE JSON object:
-{
-  "thought": "Brief reasoning about current state and the next step",
-  "action": {
-    "type": "click" | "type" | "finish",
-    "target_id": 12,        // integer id from the tree (for click/type)
-    "text": "some text",    // only for type
-    "submit": true          // if true, press Enter after typing
-  }
-}
+You MUST NOT output plain natural language.
+You MUST ALWAYS respond by calling the "decide_browser_action" tool with:
+- "thought": your brief reasoning about current state and next step;
+- "action": a SINGLE next action that follows the rules above.
 
 GUIDELINES:
 
@@ -125,7 +162,7 @@ PAGE TREE:
 %s
 `, input.Task, input.CurrentURL, input.History, input.DOMTree)
 
-	// защита от слишком длинного промпта
+	// Guard against too long prompt
 	if len(userMessage) > 60000 {
 		userMessage = userMessage[:60000] + "\n... (truncated)"
 	}
@@ -144,9 +181,15 @@ PAGE TREE:
 				Content: userMessage,
 			},
 		},
-		ResponseFormat: &openai.ChatCompletionResponseFormat{
-			Type: openai.ChatCompletionResponseFormatTypeJSONObject,
+		Tools: []openai.Tool{browserActionTool},
+		ToolChoice: &openai.ToolChoice{
+			// Force the model to always call our function
+			Type: openai.ToolTypeFunction,
+			Function: openai.ToolFunction{
+				Name: browserActionTool.Function.Name, // "decide_browser_action"
+			},
 		},
+		Temperature: 0.2,
 	}
 
 	resp, err := c.client.CreateChatCompletion(ctx, req)
@@ -158,16 +201,21 @@ PAGE TREE:
 		return nil, fmt.Errorf("no response choices")
 	}
 
-	content := resp.Choices[0].Message.Content
-
-	var output DecisionOutput
-	if err := json.Unmarshal([]byte(content), &output); err != nil {
-		return nil, fmt.Errorf("json parse error: %w | content: %s", err, content)
+	msg := resp.Choices[0].Message
+	if len(msg.ToolCalls) == 0 {
+		return nil, fmt.Errorf("LLM did not call decide_browser_action tool")
 	}
 
-	// Защитный пост-процессинг: если модель всё-таки вернула "navigate" — запрещаем
+	toolCall := msg.ToolCalls[0]
+	rawArgs := toolCall.Function.Arguments // JSON string: {"thought": "...", "action": {...}}
+
+	var output DecisionOutput
+	if err := json.Unmarshal([]byte(rawArgs), &output); err != nil {
+		return nil, fmt.Errorf("json parse error: %w | raw tool args: %s", err, rawArgs)
+	}
+
+	// Safety post-processing: if the model still returns "navigate" — disallow it
 	if output.Action.Type == ActionNavigate {
-		// если есть target_id, превращаем навигацию в клик по этому элементу
 		if output.Action.TargetID != 0 {
 			output.Thought += " | SYSTEM: 'navigate' is not allowed; converted to 'click' on the same target."
 			output.Action.Type = ActionClick
