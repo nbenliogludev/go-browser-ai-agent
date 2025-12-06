@@ -25,12 +25,15 @@ func NewAgent(b *browser.Manager, c llm.Client) *Agent {
 func (a *Agent) Run(task string, maxSteps int) error {
 	reader := bufio.NewReader(os.Stdin)
 
-	history := make([]string, 0, maxSteps)
+	// Память шагов: история + защита от циклов и повторяющихся паттернов.
+	// maxLines=8, loopThreshold=3 → одно и то же действие больше 3 раз подряд запрещаем,
+	// плюс детект паттернов из двух действий.
+	mem := NewStepMemory(8, 3)
 
 	for step := 1; step <= maxSteps; step++ {
 		fmt.Printf("\n--- STEP %d ---\n", step)
 
-		state := playwright.LoadState("networkidle")
+		state := playwright.LoadState(browser.LoadStateNetworkidle)
 		a.browser.Page.WaitForLoadState(playwright.PageWaitForLoadStateOptions{
 			State: &state,
 		})
@@ -48,10 +51,37 @@ func (a *Agent) Run(task string, maxSteps int) error {
 		}
 		fmt.Printf("Tree preview:\n%s\n", preview)
 
-		histStr := strings.Join(history, "\n")
+		histStr := mem.HistoryString()
+
+		// --------- Динамическое уточнение задачи (phase control) ---------
+		// Никаких правок system prompt — только user-task.
+		effectiveTask := task
+
+		taskLower := strings.ToLower(task)
+		wantsCart :=
+			strings.Contains(taskLower, "корзин") || // рус. "корзина"
+				strings.Contains(taskLower, "cart") ||
+				strings.Contains(taskLower, "basket") ||
+				strings.Contains(taskLower, "checkout") ||
+				strings.Contains(taskLower, "sepet") // тур. "sepet", "sepete"
+
+		hasDialog := strings.Contains(snapshot.Tree, `context="dialog"`)
+
+		// Если уже была попытка повторяющегося паттерна (loop guard сработал),
+		// пользователь явно просил "перейти в корзину",
+		// и при этом мы не в модалке — пора перестать думать про "добавление"
+		// и сфокусироваться на переходе в корзину/checkout.
+		if wantsCart && mem.LoopTriggered() && !hasDialog {
+			effectiveTask = task + `
+			
+NOTE: It looks like the requested item has already been added or the "add to cart"
+action was repeated in a loop. From now on, DO NOT try to add the same item again.
+Focus ONLY on opening the cart/basket/checkout page and proceeding there.`
+		}
+		// -----------------------------------------------------------------
 
 		decision, err := a.llm.DecideAction(llm.DecisionInput{
-			Task:       task,
+			Task:       effectiveTask,
 			DOMTree:    snapshot.Tree,
 			CurrentURL: snapshot.URL,
 			History:    histStr,
@@ -64,6 +94,24 @@ func (a *Agent) Run(task string, maxSteps int) error {
 		fmt.Printf("⚡ ACTION: %s [%d] %q\n",
 			decision.Action.Type, decision.Action.TargetID, decision.Action.Text)
 
+		// Жёсткая защита от зацикливания:
+		// если модель снова хочет воспроизвести тот же action или тот же паттерн,
+		// мы его не выполняем и добавляем SYSTEM NOTE в историю.
+		if blocked, reason := mem.ShouldBlock(snapshot.URL, decision.Action); blocked {
+			fmt.Printf("⛔ LOOP GUARD: suppressing action %s on target %d\n",
+				decision.Action.Type, decision.Action.TargetID)
+			if reason != "" {
+				fmt.Println(reason)
+				mem.AddSystemNote(reason)
+			}
+			// отмечаем, что защита от цикла уже срабатывала —
+			// это потом используем для смены "фазы" (добавление -> переход в корзину)
+			mem.MarkLoopTriggered()
+
+			time.Sleep(1 * time.Second)
+			continue
+		}
+
 		if decision.Action.Type == llm.ActionFinish {
 			fmt.Println("✅ Task completed!")
 			return nil
@@ -72,14 +120,8 @@ func (a *Agent) Run(task string, maxSteps int) error {
 		if err := a.executeAction(reader, decision.Action); err != nil {
 			log.Printf("Action failed: %v. Retrying...", err)
 		} else {
-			summary := fmt.Sprintf(
-				"step=%d url=%s action=%s target=%d text=%q",
-				step, snapshot.URL, decision.Action.Type, decision.Action.TargetID, decision.Action.Text,
-			)
-			history = append(history, summary)
-			if len(history) > 5 {
-				history = history[len(history)-5:]
-			}
+			// в память попадают только успешно выполненные действия
+			mem.Add(step, snapshot.URL, decision.Action)
 		}
 
 		time.Sleep(2 * time.Second)

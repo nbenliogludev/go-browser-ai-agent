@@ -47,7 +47,7 @@ func TestGetir_MargheritaMedium(t *testing.T) {
 	time.Sleep(5 * time.Second)
 
 	// 5. Запускаем сценарий
-	task := "закажи пиццу маргариту среднего размера остановись перед оплатой"
+	task := "добавь одну пиццу маргариту в корзину затем перейди в корзину"
 	if err := a.Run(task, 25); err != nil {
 		t.Fatalf("agent finished with error: %v", err)
 	}

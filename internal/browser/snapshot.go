@@ -2,6 +2,7 @@ package browser
 
 import (
 	"fmt"
+	"strings"
 )
 
 type PageSnapshot struct {
@@ -239,7 +240,7 @@ func (m *Manager) Snapshot() (*PageSnapshot, error) {
 				}
 
 				for (const child of el.childNodes) {
-					output += traverse(child, depth + 1);
+					output += traverse(child, depth+1);
 				}
 
 				return output;
@@ -259,6 +260,13 @@ func (m *Manager) Snapshot() (*PageSnapshot, error) {
 	treeStr, ok := result.(string)
 	if !ok {
 		return nil, fmt.Errorf("expected string from js, got %T", result)
+	}
+
+	// DEBUG: ищем кнопку корзины в снапшоте
+	if strings.Contains(treeStr, "Sepete git") {
+		fmt.Println("DEBUG: cart button 'Sepete git' IS present in snapshot")
+	} else {
+		fmt.Println("DEBUG: cart button 'Sepete git' NOT found in snapshot")
 	}
 
 	title, _ := m.Page.Title()
