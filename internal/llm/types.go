@@ -3,7 +3,8 @@ package llm
 type ActionType string
 
 const (
-	ActionClick     ActionType = "click"
+	ActionClick ActionType = "click"
+	// Навигация по URL больше не используется, но оставляем константу для совместимости
 	ActionNavigate  ActionType = "navigate"
 	ActionTypeInput ActionType = "type"
 	ActionFinish    ActionType = "finish"
@@ -14,15 +15,14 @@ type Action struct {
 	TargetID int        `json:"target_id,omitempty"`
 	Text     string     `json:"text,omitempty"`
 	URL      string     `json:"url,omitempty"`
-
-	// НОВОЕ ПОЛЕ: Если true, агент нажмет Enter после ввода
-	Submit bool `json:"submit,omitempty"`
+	Submit   bool       `json:"submit,omitempty"`
 }
 
 type DecisionInput struct {
 	Task       string
 	DOMTree    string
 	CurrentURL string
+	History    string // краткое описание прошлых шагов
 }
 
 type DecisionOutput struct {
