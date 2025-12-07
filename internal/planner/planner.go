@@ -55,19 +55,21 @@ Each step must have:
 
 "navigation":
   - moving between pages or sections
-  - opening a list/search page where the relevant items can be found
+  - opening a site, choosing a restaurant, category, or product list
 
 "interaction":
   - working inside a specific page or modal
   - filling forms, selecting options, pressing confirm / add-to-cart / apply buttons
 
-IMPORTANT:
-- Steps describe WHAT should be achieved, not the exact UI labels or paths.
-- You do NOT know the real site structure. Avoid over-specific phrases like
-  "click the 'Pizza' category in the global menu".
-- Prefer neutral goals that can be satisfied in multiple ways, e.g.:
-    * "open a page with restaurant list that contains pizzas"
-    * "select a medium-sized Margherita pizza and prepare it for adding to the cart"
+In e-commerce or "add to cart" style tasks:
+- Prefer at most 3-4 steps total.
+- When the user asks to select an item and add it to a cart (for example: "add a medium Margherita pizza to the cart"),
+  COMBINE selection and confirming "add to cart" into a SINGLE "interaction" step instead of two separate steps.
+  For example, instead of:
+    2. select a medium Margherita pizza (interaction)
+    3. add selected pizza to cart (interaction)
+  you should produce:
+    2. select a medium Margherita pizza and add it to the cart (interaction)
 
 Return a JSON object of the form:
 {
@@ -125,10 +127,10 @@ func (p *OpenAIPlanner) BuildPlan(ctx context.Context, task string) (*Plan, erro
 		mode := strings.ToLower(strings.TrimSpace(plan.Steps[i].Mode))
 		if mode != ModeNavigation && mode != ModeInteraction {
 			// простая эвристика: всё, что похоже на "search / go to / open" – navigation
-			goalLower := strings.ToLower(plan.Steps[i].Goal)
-			if strings.Contains(goalLower, "search") ||
-				strings.Contains(goalLower, "go to") ||
-				strings.Contains(goalLower, "open") {
+			lg := strings.ToLower(plan.Steps[i].Goal)
+			if strings.Contains(lg, "search") ||
+				strings.Contains(lg, "go to") ||
+				strings.Contains(lg, "open") {
 				mode = ModeNavigation
 			} else {
 				mode = ModeInteraction

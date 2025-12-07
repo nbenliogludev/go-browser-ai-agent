@@ -84,6 +84,7 @@ func (o *Orchestrator) Run(task string, maxSteps int) (err error) {
 			State: &state,
 		})
 
+		// Снапшот ДО действия
 		snapshot, snapErr := o.browser.Snapshot()
 		if snapErr != nil {
 			err = fmt.Errorf("snapshot failed: %w", snapErr)
@@ -104,10 +105,11 @@ func (o *Orchestrator) Run(task string, maxSteps int) (err error) {
 
 		stepGoal := plan.Steps[currentPlanStep]
 
-		// Если видна модалка - принудительно interaction-режим.
-		hasDialog := strings.Contains(snapshot.Tree, `context="dialog"`) ||
-			strings.Contains(snapshot.Tree, "=== ACTIVE DIALOG ===")
+		// Есть ли активная модалка?
+		hasDialog := strings.Contains(snapshot.Tree, "=== ACTIVE DIALOG ===") ||
+			strings.Contains(snapshot.Tree, `context="dialog"`)
 
+		// Если видна модалка - принудительно interaction-режим.
 		mode := stepGoal.Mode
 		if hasDialog && mode == planner.ModeNavigation {
 			mode = planner.ModeInteraction
@@ -120,6 +122,7 @@ func (o *Orchestrator) Run(task string, maxSteps int) (err error) {
 			URL:         snapshot.URL,
 			DOMTree:     snapshot.Tree,
 			History:     mem.HistoryLines(),
+			HasDialog:   hasDialog,
 		}
 
 		var subAgent SubAgent
@@ -132,7 +135,7 @@ func (o *Orchestrator) Run(task string, maxSteps int) (err error) {
 		fmt.Printf("🎯 CURRENT GOAL (%s): %s\n", mode, stepGoal.Goal)
 		fmt.Printf("👤 SUB-AGENT: %s\n", subAgent.Name())
 
-		action, thought, stepDone, stepErr := subAgent.Step(ctx, env)
+		action, thought, stepDoneLLM, stepErr := subAgent.Step(ctx, env)
 		if stepErr != nil {
 			err = fmt.Errorf("%s step error: %w", subAgent.Name(), stepErr)
 			return err
@@ -140,7 +143,7 @@ func (o *Orchestrator) Run(task string, maxSteps int) (err error) {
 
 		fmt.Printf("\n🤖 THOUGHT: %s\n", thought)
 		fmt.Printf("⚡ ACTION: %s [%d] %q (step_done=%v)\n",
-			action.Type, action.TargetID, action.Text, stepDone)
+			action.Type, action.TargetID, action.Text, stepDoneLLM)
 
 		// Loop guard (including pattern detection)
 		if blocked, reason := mem.ShouldBlock(snapshot.URL, *action); blocked {
@@ -180,19 +183,55 @@ func (o *Orchestrator) Run(task string, maxSteps int) (err error) {
 			return nil
 		}
 
+		// Выполняем действие
+		actionHadEffect := false
 		if execErr := o.executeAction(reader, *action); execErr != nil {
 			log.Printf("Action failed: %v", execErr)
 		} else {
 			// в память попадают только успешно выполненные действия
 			mem.Add(step, snapshot.URL, *action)
+			actionHadEffect = true
+		}
 
-			// Если LLM явно сказал, что план-шаг выполнен — двигаемся дальше.
-			if stepDone {
-				currentPlanStep++
+		// Даём странице чуть обновиться
+		time.Sleep(1200 * time.Millisecond)
+
+		// Снапшот ПОСЛЕ действия (для детекта закрытия модалки)
+		afterSnapshot, afterErr := o.browser.Snapshot()
+		if afterErr != nil {
+			log.Printf("After-snapshot failed: %v", afterErr)
+		}
+
+		hasDialogAfter := false
+		if afterSnapshot != nil {
+			hasDialogAfter = strings.Contains(afterSnapshot.Tree, "=== ACTIVE DIALOG ===") ||
+				strings.Contains(afterSnapshot.Tree, `context="dialog"`)
+		}
+
+		// Итоговый флаг завершения шага: то, что сказал LLM, плюс наша хевристика
+		autoStepDone := stepDoneLLM
+
+		// 🔑 КЛЮЧЕВАЯ ХЕВРИСТИКА:
+		// если мы были в модалке в interaction-режиме, сделали действие,
+		// и модалка исчезла — считаем, что текущий план-шаг выполнен.
+		if mode == planner.ModeInteraction && hasDialog && !hasDialogAfter && actionHadEffect {
+			autoStepDone = true
+			note := "SYSTEM NOTE: A dialog/modal was open before the last interaction but is now closed. " +
+				"Treat the CURRENT PLAN STEP as completed (for example, the item was added or the form was submitted). " +
+				"Do NOT reopen similar items or add more of the same product for this step; move on to the next plan step."
+			fmt.Println(note)
+			mem.AddSystemNote(note)
+		}
+
+		if autoStepDone {
+			currentPlanStep++
+			if currentPlanStep >= len(plan.Steps) {
+				fmt.Println("✅ All plan steps processed — finishing.")
+				return nil
 			}
 		}
 
-		time.Sleep(2 * time.Second)
+		time.Sleep(1 * time.Second)
 	}
 
 	err = fmt.Errorf("max steps reached")
