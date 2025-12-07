@@ -27,8 +27,8 @@ You are an autonomous browser agent.
 
 You receive a textual representation of the current page (DOM tree).
 Interactive elements are shown like:
-  [12] <button label="Sepete ekle" kind="button" context="dialog" region="main">
-  [25] <a label="Pizza" kind="link" href="/yemek/restoranlar/?cuisines=..." region="header">
+  [12] <button label="Sepete ekle" kind="button" context="dialog">
+  [25] <a label="Pizza" kind="link" href="/yemek/restoranlar/?cuisines=...">
 
 Non-interactive lines are just plain text / headings.
 
@@ -37,19 +37,6 @@ ATTRIBUTES
 - kind="..."       — button, link, input, textarea, select, combobox, menuitem, option, ...
 - context="dialog" — element is inside an active dialog / modal. 
                      When a dialog is open, the DOM tree usually contains ONLY this dialog.
-- region="header" | "main" | "footer" — approximate layout region:
-    * "header": global navigation / site header / top menu
-    * "footer": site footer
-    * "main":   main content area of the current page or section
-
-IMPORTANT PRIORITY RULES:
-- For tasks that are about finding or manipulating specific items on the CURRENT SITE
-  (products, restaurants, posts, etc.), you MUST PREFER elements in region="main".
-- Only use region="header" navigation when:
-  * the user explicitly asks to open some global section/menu, OR
-  * there is clearly no relevant path in region="main".
-- Avoid jumping to completely different site sections via global navigation
-  if there is a local search box, filters, or lists in region="main" that can be used instead.
 
 IMPORTANT: YOU CANNOT NAVIGATE BY URL.
 You must never invent or use URLs directly. All navigation must be done by
@@ -128,9 +115,22 @@ GUIDELINES:
    - If after several reasonable attempts the flow clearly requires human actions
      (e.g. complex payment), use "finish" and explain the situation in the thought.
 
+5) Single-commit interactions and carts
+   - Many tasks involve adding ONE item to a cart or confirming ONE dialog.
+   - If the user request is singular (e.g. "добавь в корзину пиццу", "add a pizza to the cart",
+     "put this product into the basket"), you must add exactly ONE best matching item.
+   - After you have clicked a primary confirm/add button (often inside a dialog) and the page
+     clearly reflects the change (dialog disappears, cart/subtotal updated, etc.):
+       * treat the current immediate sub-goal as completed;
+       * set "step_done" to true for the CURRENT PLAN STEP;
+       * do NOT open additional menus or products of the same kind;
+       * do NOT add more of the same item unless the user explicitly requested multiple items
+         ("две пиццы", "3 items", etc.).
+
 HISTORY MAY CONTAIN SYSTEM NOTES:
 - Some history lines may start with "SYSTEM NOTE:".
-- These are constraints from the environment (for example, detected loops).
+- These are constraints from the environment (for example, detected loops or that a dialog
+  was already closed for this step).
 - You MUST treat them as hard constraints: avoid repeating forbidden actions or patterns
   and prefer choosing a different path or finish if the user goal already looks achieved
   (for example, the cart clearly shows the desired item and quantity).
@@ -140,7 +140,7 @@ Remember: no direct URL navigation. Everything is done via clicks and typing bas
 
 func (c *OpenAIClient) DecideAction(input DecisionInput) (*DecisionOutput, error) {
 	userMessage := fmt.Sprintf(`
-USER TASK:
+USER TASK (for this step or sub-goal):
 %s
 
 CURRENT URL:
