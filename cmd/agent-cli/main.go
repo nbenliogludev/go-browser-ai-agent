@@ -10,49 +10,65 @@ import (
 	"github.com/nbenliogludev/go-browser-ai-agent/internal/agent"
 	"github.com/nbenliogludev/go-browser-ai-agent/internal/browser"
 	"github.com/nbenliogludev/go-browser-ai-agent/internal/llm"
+	"github.com/nbenliogludev/go-browser-ai-agent/internal/planner"
 )
 
 func main() {
-	fmt.Println("Starting AI browser agent (execution loop)...")
-
-	mgr, err := browser.NewManager()
-	if err != nil {
-		log.Fatalf("failed to start browser manager: %v", err)
-	}
-	defer mgr.Close()
-
 	reader := bufio.NewReader(os.Stdin)
 
+	fmt.Println("Starting AI browser agent (orchestrator mode)...")
+
+	// 1) Начальный URL
 	fmt.Print("Введите стартовый URL (пусто = https://example.com): ")
-	rawURL, _ := reader.ReadString('\n')
-	url := strings.TrimSpace(rawURL)
-	if url == "" {
-		url = "https://example.com"
+	startURL, _ := reader.ReadString('\n')
+	startURL = strings.TrimSpace(startURL)
+	if startURL == "" {
+		startURL = "https://example.com"
 	}
 
-	_, err = mgr.Page.Goto(url)
-	if err != nil {
-		log.Fatalf("could not navigate to %s: %v", url, err)
-	}
-
-	fmt.Print("Опишите задачу для агента (например: 'Найди кнопку входа и нажми её'):\n> ")
+	// 2) Пользовательская задача
+	fmt.Println("Опишите задачу для агента (например: 'Найди кнопку входа и нажми её'):")
+	fmt.Print("> ")
 	rawTask, _ := reader.ReadString('\n')
-	task := strings.TrimSpace(rawTask)
-	if task == "" {
-		log.Fatalf("пустая задача — нечего решать")
+	rawTask = strings.TrimSpace(rawTask)
+	if rawTask == "" {
+		log.Fatal("Пустая задача — агенту нечего делать.")
 	}
 
+	// 🔴 Обогащаем задачу контекстом про стартовый URL
+	task := agent.BuildTaskWithEnvironment(rawTask, startURL)
+
+	// 3) Браузер
+	bm, err := browser.NewManager()
+	if err != nil {
+		log.Fatalf("Не удалось запустить браузер: %v", err)
+	}
+	defer bm.Close()
+
+	// 4) Открываем стартовый URL
+	if _, err := bm.Page.Goto(startURL); err != nil {
+		log.Fatalf("Не удалось открыть стартовый URL %s: %v", startURL, err)
+	}
+
+	// 5) LLM client
 	llmClient, err := llm.NewOpenAIClient()
 	if err != nil {
-		log.Fatalf("failed to create OpenAI client: %v", err)
+		log.Fatalf("Ошибка инициализации LLM клиента: %v", err)
 	}
 
-	ag := agent.NewAgent(mgr, llmClient)
+	// 6) Planner client
+	plannerClient, err := planner.NewOpenAIPlanner()
+	if err != nil {
+		log.Fatalf("Ошибка инициализации planner клиента: %v", err)
+	}
 
-	if err := ag.Run(task, 15); err != nil {
+	// 7) Orchestrator (planner + navigator + interaction)
+	orch := agent.NewOrchestrator(bm, plannerClient, llmClient)
+
+	// 8) Запускаем оркестратор
+	const maxSteps = 30
+	if err := orch.Run(task, maxSteps); err != nil {
 		log.Printf("Агент завершил работу с ошибкой: %v", err)
-	} else {
-		log.Printf("Агент завершил работу без ошибок.")
 	}
 
 	fmt.Println("\nНажмите Enter, чтобы закрыть браузер...")

@@ -27,8 +27,8 @@ You are an autonomous browser agent.
 
 You receive a textual representation of the current page (DOM tree).
 Interactive elements are shown like:
-  [12] <button label="Sepete ekle" kind="button" context="dialog">
-  [25] <a label="Pizza" kind="link" href="/yemek/restoranlar/?cuisines=...">
+  [12] <button label="Sepete ekle" kind="button" context="dialog" region="main">
+  [25] <a label="Pizza" kind="link" href="/yemek/restoranlar/?cuisines=..." region="header">
 
 Non-interactive lines are just plain text / headings.
 
@@ -37,6 +37,19 @@ ATTRIBUTES
 - kind="..."       — button, link, input, textarea, select, combobox, menuitem, option, ...
 - context="dialog" — element is inside an active dialog / modal. 
                      When a dialog is open, the DOM tree usually contains ONLY this dialog.
+- region="header" | "main" | "footer" — approximate layout region:
+    * "header": global navigation / site header / top menu
+    * "footer": site footer
+    * "main":   main content area of the current page or section
+
+IMPORTANT PRIORITY RULES:
+- For tasks that are about finding or manipulating specific items on the CURRENT SITE
+  (products, restaurants, posts, etc.), you MUST PREFER elements in region="main".
+- Only use region="header" navigation when:
+  * the user explicitly asks to open some global section/menu, OR
+  * there is clearly no relevant path in region="main".
+- Avoid jumping to completely different site sections via global navigation
+  if there is a local search box, filters, or lists in region="main" that can be used instead.
 
 IMPORTANT: YOU CANNOT NAVIGATE BY URL.
 You must never invent or use URLs directly. All navigation must be done by
@@ -60,6 +73,7 @@ RESPONSE FORMAT (STRICT):
 Return a SINGLE JSON object:
 {
   "thought": "Brief reasoning about current state and the next step",
+  "step_done": false,
   "action": {
     "type": "click" | "type" | "finish",
     "target_id": 12,        // integer id from the tree (for click/type)
@@ -67,6 +81,20 @@ Return a SINGLE JSON object:
     "submit": true          // if true, press Enter after typing
   }
 }
+
+- "thought" must be a short explanation of why you chose this exact next step.
+- "action" must describe exactly ONE next atomic action.
+- "step_done" is a boolean flag:
+    * false — the current immediate sub-goal (described in the user message,
+      for example the CURRENT PLAN STEP) is NOT fully completed yet.
+    * true  — the current immediate sub-goal is completed and the orchestrator
+      is allowed to move to the next high-level plan step.
+
+Examples of when to set "step_done" to true:
+- You have already added the requested item to the cart and the page state reflects it
+  (cart value updated, dialog closed, quantity is correct).
+- You have finished filling and submitting the required form.
+- You have completed the current high-level step and further repetitions would be redundant.
 
 GUIDELINES:
 
@@ -125,7 +153,7 @@ PAGE TREE:
 %s
 `, input.Task, input.CurrentURL, input.History, input.DOMTree)
 
-	// защита от слишком длинного промпта
+	// Guard against too long prompt
 	if len(userMessage) > 60000 {
 		userMessage = userMessage[:60000] + "\n... (truncated)"
 	}
@@ -165,9 +193,8 @@ PAGE TREE:
 		return nil, fmt.Errorf("json parse error: %w | content: %s", err, content)
 	}
 
-	// Защитный пост-процессинг: если модель всё-таки вернула "navigate" — запрещаем
+	// Safety post-processing: navigation by raw URL is not allowed at this level
 	if output.Action.Type == ActionNavigate {
-		// если есть target_id, превращаем навигацию в клик по этому элементу
 		if output.Action.TargetID != 0 {
 			output.Thought += " | SYSTEM: 'navigate' is not allowed; converted to 'click' on the same target."
 			output.Action.Type = ActionClick

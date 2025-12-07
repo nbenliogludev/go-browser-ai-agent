@@ -29,8 +29,14 @@ func (m *Manager) Snapshot() (*PageSnapshot, error) {
 
 		function isVisible(el) {
 			if (!el || !el.getBoundingClientRect) return false;
+
+			// Игнорируем aria-hidden (типичные клоны слайдов и т.п.)
+			const ariaHidden = el.getAttribute('aria-hidden');
+			if (ariaHidden === 'true') return false;
+
 			const rect = el.getBoundingClientRect();
 			const style = window.getComputedStyle(el);
+
 			return rect.width > 0 && rect.height > 0 &&
 				style.visibility !== 'hidden' &&
 				style.display !== 'none' &&
@@ -126,6 +132,32 @@ func (m *Manager) Snapshot() (*PageSnapshot, error) {
 			return '';
 		}
 
+		function getRegion(el) {
+			let cur = el;
+			while (cur && cur !== document.body) {
+				const tag = cur.tagName.toLowerCase();
+				const role = (cur.getAttribute('role') || '').toLowerCase();
+				const className = (cur.className && typeof cur.className === 'string')
+					? cur.className.toLowerCase()
+					: '';
+
+				// Шапка / глобальная навигация
+				if (tag === 'header' || role === 'banner' ||
+					/\b(header|top-nav|navbar|site-header)\b/.test(className)) {
+					return 'header';
+				}
+
+				// Подвал
+				if (tag === 'footer' || role === 'contentinfo' ||
+					/\b(footer|site-footer)\b/.test(className)) {
+					return 'footer';
+				}
+
+				cur = cur.parentElement;
+			}
+			return 'main';
+		}
+
 		// ---------- поиск активной модалки ----------
 		function findActiveModal() {
 			const selectors = [
@@ -160,6 +192,12 @@ func (m *Manager) Snapshot() (*PageSnapshot, error) {
 
 		const activeModal = findActiveModal();
 		const root = activeModal || document.body;
+
+		let header = "";
+		if (activeModal) {
+			// Явный маркер, что мы в активной модалке
+			header = "=== ACTIVE DIALOG ===\n";
+		}
 
 		function traverse(node, depth) {
 			if (!node) return '';
@@ -204,6 +242,10 @@ func (m *Manager) Snapshot() (*PageSnapshot, error) {
 						parts.push('context="dialog"');
 					}
 
+					// Регион: header / main / footer
+					const region = getRegion(el);
+					parts.push('region="' + escapeAttr(region) + '"');
+
 					if (tag === 'input' || tag === 'textarea') {
 						const value = cleanText(el.value || '');
 						const placeholder = cleanText(el.getAttribute('placeholder') || '');
@@ -229,7 +271,7 @@ func (m *Manager) Snapshot() (*PageSnapshot, error) {
 
 					output += prefix + '[' + aiId + '] ' + parts.join(' ') + '>\n';
 				} else {
-					// показываем заголовки (в т.ч. заголовок модалки)
+					// Показываем заголовки (в т.ч. заголовок модалки)
 					if (['h1','h2','h3','h4','h5'].includes(tag)) {
 						const headingText = cleanText(el.innerText || el.textContent || '');
 						if (headingText) {
@@ -249,7 +291,7 @@ func (m *Manager) Snapshot() (*PageSnapshot, error) {
 			return '';
 		}
 
-		return traverse(root, 0);
+		return header + traverse(root, 0);
 	}`
 
 	result, err := m.Page.Evaluate(script)

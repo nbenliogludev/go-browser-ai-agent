@@ -32,15 +32,35 @@ func NewOrchestrator(b *browser.Manager, p planner.Client, llmClient llm.Client)
 	}
 }
 
-func (o *Orchestrator) Run(task string, maxSteps int) error {
+// Run — основной цикл оркестратора.
+// Всегда печатает финальный репорт по действиям (успех или ошибка).
+func (o *Orchestrator) Run(task string, maxSteps int) (err error) {
 	reader := bufio.NewReader(os.Stdin)
 	ctx := context.Background()
 
-	// Общая память шагов для обоих под-агентов:
-	// история + защита от циклов и паттернов.
+	// Shared step memory (loop protection) for both sub-agents.
 	mem := NewStepMemory(10, 3)
 
-	// 0. План
+	// Финальный репорт по итогам работы
+	defer func() {
+		fmt.Println("\n===== EXECUTION REPORT =====")
+		lines := mem.FullHistory()
+		if len(lines) == 0 {
+			fmt.Println("(no actions recorded)")
+		} else {
+			for _, l := range lines {
+				fmt.Println(l)
+			}
+		}
+
+		if err != nil {
+			fmt.Printf("\nFINAL STATUS: ERROR: %v\n", err)
+		} else {
+			fmt.Println("\nFINAL STATUS: SUCCESS")
+		}
+	}()
+
+	// 0. Build high-level plan
 	plan, err := o.planner.BuildPlan(ctx, task)
 	if err != nil {
 		return fmt.Errorf("build plan failed: %w", err)
@@ -52,6 +72,8 @@ func (o *Orchestrator) Run(task string, maxSteps int) error {
 	}
 
 	currentPlanStep := 0
+	// Сколько раз луп-гард блокировал действия в рамках конкретного шага плана
+	loopBlocksPerStep := make(map[int]int)
 
 	for step := 1; step <= maxSteps; step++ {
 		fmt.Printf("\n--- STEP %d (plan %d/%d) ---\n",
@@ -62,9 +84,10 @@ func (o *Orchestrator) Run(task string, maxSteps int) error {
 			State: &state,
 		})
 
-		snapshot, err := o.browser.Snapshot()
-		if err != nil {
-			return fmt.Errorf("snapshot failed: %w", err)
+		snapshot, snapErr := o.browser.Snapshot()
+		if snapErr != nil {
+			err = fmt.Errorf("snapshot failed: %w", snapErr)
+			return err
 		}
 
 		fmt.Printf("URL: %s\nTitle: %s\n", snapshot.URL, snapshot.Title)
@@ -81,8 +104,10 @@ func (o *Orchestrator) Run(task string, maxSteps int) error {
 
 		stepGoal := plan.Steps[currentPlanStep]
 
-		// если есть модалка — форсируем interaction
-		hasDialog := strings.Contains(snapshot.Tree, `context="dialog"`)
+		// Если видна модалка - принудительно interaction-режим.
+		hasDialog := strings.Contains(snapshot.Tree, `context="dialog"`) ||
+			strings.Contains(snapshot.Tree, "=== ACTIVE DIALOG ===")
+
 		mode := stepGoal.Mode
 		if hasDialog && mode == planner.ModeNavigation {
 			mode = planner.ModeInteraction
@@ -107,16 +132,17 @@ func (o *Orchestrator) Run(task string, maxSteps int) error {
 		fmt.Printf("🎯 CURRENT GOAL (%s): %s\n", mode, stepGoal.Goal)
 		fmt.Printf("👤 SUB-AGENT: %s\n", subAgent.Name())
 
-		action, thought, err := subAgent.Step(ctx, env)
-		if err != nil {
-			return fmt.Errorf("%s step error: %w", subAgent.Name(), err)
+		action, thought, stepDone, stepErr := subAgent.Step(ctx, env)
+		if stepErr != nil {
+			err = fmt.Errorf("%s step error: %w", subAgent.Name(), stepErr)
+			return err
 		}
 
 		fmt.Printf("\n🤖 THOUGHT: %s\n", thought)
-		fmt.Printf("⚡ ACTION: %s [%d] %q\n",
-			action.Type, action.TargetID, action.Text)
+		fmt.Printf("⚡ ACTION: %s [%d] %q (step_done=%v)\n",
+			action.Type, action.TargetID, action.Text, stepDone)
 
-		// Жёсткая защита от цикла (в том числе по паттернам действий)
+		// Loop guard (including pattern detection)
 		if blocked, reason := mem.ShouldBlock(snapshot.URL, *action); blocked {
 			fmt.Printf("⛔ LOOP GUARD: suppressing action %s on target %d\n",
 				action.Type, action.TargetID)
@@ -124,26 +150,44 @@ func (o *Orchestrator) Run(task string, maxSteps int) error {
 				fmt.Println(reason)
 				mem.AddSystemNote(reason)
 			}
+			mem.MarkLoopTriggered()
+
+			loopBlocksPerStep[currentPlanStep]++
+
+			// Если для текущего шага плана луп-гард сработал несколько раз подряд —
+			// считаем, что этот шаг либо уже выполнен, либо дальше автоматом его не продвинуть.
+			if loopBlocksPerStep[currentPlanStep] >= 2 {
+				fmt.Printf("🔁 LOOP GUARD: too many blocked actions in plan step %d, forcing move to the next plan step.\n",
+					plan.Steps[currentPlanStep].Index)
+				mem.AddSystemNote(fmt.Sprintf(
+					"SYSTEM NOTE: Several actions for plan step %d were blocked as loops. "+
+						"Treat this plan step as completed or not actionable and move on.",
+					plan.Steps[currentPlanStep].Index,
+				))
+				currentPlanStep++
+				if currentPlanStep >= len(plan.Steps) {
+					fmt.Println("✅ All plan steps processed — finishing.")
+					return nil
+				}
+			}
+
 			time.Sleep(1 * time.Second)
 			continue
 		}
 
 		if action.Type == llm.ActionFinish {
-			fmt.Println("✅ Sub-agent requested finish.")
+			fmt.Println("✅ Sub-agent requested global finish.")
 			return nil
 		}
 
-		if err := o.executeAction(reader, *action); err != nil {
-			log.Printf("Action failed: %v", err)
+		if execErr := o.executeAction(reader, *action); execErr != nil {
+			log.Printf("Action failed: %v", execErr)
 		} else {
+			// в память попадают только успешно выполненные действия
 			mem.Add(step, snapshot.URL, *action)
 
-			// Простая эвристика завершения шага
-			if mode == planner.ModeNavigation {
-				if snapshot.URL != o.browser.Page.URL() {
-					currentPlanStep++
-				}
-			} else {
+			// Если LLM явно сказал, что план-шаг выполнен — двигаемся дальше.
+			if stepDone {
 				currentPlanStep++
 			}
 		}
@@ -151,7 +195,8 @@ func (o *Orchestrator) Run(task string, maxSteps int) error {
 		time.Sleep(2 * time.Second)
 	}
 
-	return fmt.Errorf("max steps reached")
+	err = fmt.Errorf("max steps reached")
+	return err
 }
 
 func (o *Orchestrator) executeAction(reader *bufio.Reader, action llm.Action) error {

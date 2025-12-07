@@ -9,10 +9,12 @@ import (
 	"github.com/nbenliogludev/go-browser-ai-agent/internal/agent"
 	"github.com/nbenliogludev/go-browser-ai-agent/internal/browser"
 	"github.com/nbenliogludev/go-browser-ai-agent/internal/llm"
+	"github.com/nbenliogludev/go-browser-ai-agent/internal/planner"
 )
 
-// Этот тест реальный: он открывает Chromium, идёт на getir и
-// просит агента добавить первую попавшуюся маргариту среднего размера.
+// Этот тест реальный: он открывает Chromium, идёт на GetirYemek и
+// просит оркестратор добавить маргариту среднего/любого размера в корзину,
+// затем перейти в корзину.
 func TestGetir_MargheritaMedium(t *testing.T) {
 	// Чтобы не запускалось случайно в CI или при go test ./...
 	if testing.Short() {
@@ -36,25 +38,32 @@ func TestGetir_MargheritaMedium(t *testing.T) {
 		t.Fatalf("failed to init llm client: %v", err)
 	}
 
-	// 3. Агент (тот же, что использует agent-cli)
-	a := agent.NewAgent(mgr, llmClient)
+	// 3. Planner-клиент
+	plannerClient, err := planner.NewOpenAIPlanner()
+	if err != nil {
+		t.Fatalf("failed to init planner client: %v", err)
+	}
 
-	// 4. Открываем стартовый URL
+	// 4. Открываем стартовый URL (как в main.go)
 	if _, err := mgr.Page.Goto("https://getir.com/yemek/"); err != nil {
 		t.Fatalf("failed to open start url: %v", err)
 	}
 	// Небольшая пауза, чтобы страница стабилизировалась
 	time.Sleep(5 * time.Second)
 
-	// 5. Запускаем сценарий
-	task := "добавь одну пиццу маргариту в корзину затем перейди в корзину"
-	if err := a.Run(task, 25); err != nil {
-		t.Fatalf("agent finished with error: %v", err)
+	// 5. Создаём оркестратор (как в CLI orchestrator mode)
+	orch := agent.NewOrchestrator(mgr, plannerClient, llmClient)
+
+	// Можно уточнить, что задача на текущем сайте:
+	task := "добавь одну пиццу маргариту среднего размера в корзину затем перейди в корзину"
+
+	// 6. Запускаем сценарий
+	if err := orch.Run(task, 35); err != nil {
+		t.Fatalf("orchestrator finished with error: %v", err)
 	}
 
-	// 6. Проверяем, что корзина, скорее всего, не пустая.
-	// Это простой, но практичный чек: в дереве должен появиться текст
-	// вида "Sepette", "Sepeti Gör" или просто "Sepet".
+	// 7. Проверяем, что корзина, скорее всего, не пустая.
+	// Ищем в дереве слова вида "Sepet", "Sepeti" и т.п.
 	snap, err := mgr.Snapshot()
 	if err != nil {
 		t.Fatalf("snapshot failed: %v", err)
