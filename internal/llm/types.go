@@ -3,8 +3,7 @@ package llm
 type ActionType string
 
 const (
-	ActionClick ActionType = "click"
-	// Навигация по URL больше не используется, но оставляем константу для совместимости
+	ActionClick     ActionType = "click"
 	ActionNavigate  ActionType = "navigate"
 	ActionTypeInput ActionType = "type"
 	ActionFinish    ActionType = "finish"
@@ -22,12 +21,13 @@ type DecisionInput struct {
 	Task       string
 	DOMTree    string
 	CurrentURL string
-	History    string // краткое описание прошлых шагов
+	History    string // short description of previous steps
 }
 
 type DecisionOutput struct {
-	Thought string `json:"thought"`
-	Action  Action `json:"action"`
+	Thought  string `json:"thought"`
+	StepDone bool   `json:"step_done"`
+	Action   Action `json:"action"`
 }
 
 type Client interface {

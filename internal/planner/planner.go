@@ -55,11 +55,19 @@ Each step must have:
 
 "navigation":
   - moving between pages or sections
-  - opening a site, choosing a restaurant, category, or product list
+  - opening a list/search page where the relevant items can be found
 
 "interaction":
   - working inside a specific page or modal
   - filling forms, selecting options, pressing confirm / add-to-cart / apply buttons
+
+IMPORTANT:
+- Steps describe WHAT should be achieved, not the exact UI labels or paths.
+- You do NOT know the real site structure. Avoid over-specific phrases like
+  "click the 'Pizza' category in the global menu".
+- Prefer neutral goals that can be satisfied in multiple ways, e.g.:
+    * "open a page with restaurant list that contains pizzas"
+    * "select a medium-sized Margherita pizza and prepare it for adding to the cart"
 
 Return a JSON object of the form:
 {
@@ -117,9 +125,10 @@ func (p *OpenAIPlanner) BuildPlan(ctx context.Context, task string) (*Plan, erro
 		mode := strings.ToLower(strings.TrimSpace(plan.Steps[i].Mode))
 		if mode != ModeNavigation && mode != ModeInteraction {
 			// простая эвристика: всё, что похоже на "search / go to / open" – navigation
-			if strings.Contains(strings.ToLower(plan.Steps[i].Goal), "search") ||
-				strings.Contains(strings.ToLower(plan.Steps[i].Goal), "go to") ||
-				strings.Contains(strings.ToLower(plan.Steps[i].Goal), "open") {
+			goalLower := strings.ToLower(plan.Steps[i].Goal)
+			if strings.Contains(goalLower, "search") ||
+				strings.Contains(goalLower, "go to") ||
+				strings.Contains(goalLower, "open") {
 				mode = ModeNavigation
 			} else {
 				mode = ModeInteraction

@@ -10,8 +10,12 @@ import (
 // StepMemory хранит краткую историю шагов и детектит циклы
 // как по одному действию, так и по повторяющимся паттернам действий.
 type StepMemory struct {
+	// последние N строк для LLM
 	lines    []string
 	maxLines int
+
+	// полный лог (для финального репорта)
+	fullLines []string
 
 	// для простого повторения одного и того же действия
 	lastActionKey string
@@ -57,6 +61,11 @@ func (m *StepMemory) Add(step int, url string, action llm.Action) {
 		"step=%d url=%s action=%s target=%d text=%q",
 		step, url, action.Type, action.TargetID, action.Text,
 	)
+
+	// Полный лог (для репорта)
+	m.fullLines = append(m.fullLines, line)
+
+	// Короткий лог (для LLM)
 	m.lines = append(m.lines, line)
 	if len(m.lines) > m.maxLines {
 		m.lines = m.lines[len(m.lines)-m.maxLines:]
@@ -128,18 +137,24 @@ func (m *StepMemory) ShouldBlock(url string, action llm.Action) (bool, string) {
 	return false, ""
 }
 
-// AddSystemNote — добавить системную заметку в историю (для LLM).
+// AddSystemNote — добавить системную заметку в историю (для LLM и репорта).
 func (m *StepMemory) AddSystemNote(note string) {
-	if strings.TrimSpace(note) == "" {
+	note = strings.TrimSpace(note)
+	if note == "" {
 		return
 	}
+
+	// В полный лог
+	m.fullLines = append(m.fullLines, note)
+
+	// И в короткий лог
 	m.lines = append(m.lines, note)
 	if len(m.lines) > m.maxLines {
 		m.lines = m.lines[len(m.lines)-m.maxLines:]
 	}
 }
 
-// HistoryLines — история шагов + системные заметки.
+// HistoryLines — история шагов + системные заметки (обрезанная для LLM).
 func (m *StepMemory) HistoryLines() []string {
 	if len(m.lines) == 0 {
 		return nil
@@ -156,6 +171,16 @@ func (m *StepMemory) HistoryString() string {
 		return ""
 	}
 	return strings.Join(lines, "\n")
+}
+
+// FullHistory — полный лог всех действий и системных заметок (для репорта).
+func (m *StepMemory) FullHistory() []string {
+	if len(m.fullLines) == 0 {
+		return nil
+	}
+	out := make([]string, len(m.fullLines))
+	copy(out, m.fullLines)
+	return out
 }
 
 // MarkLoopTriggered — пометить, что защита от цикла уже срабатывала.
