@@ -20,275 +20,210 @@ func (m *Manager) Snapshot() (*PageSnapshot, error) {
 		return nil, fmt.Errorf("page is not initialized")
 	}
 
+	// Скрипт для генерации DOM-дерева.
+	// ОПТИМИЗАЦИЯ: Игнорируем элементы вне viewport и слишком длинные тексты.
 	script := `() => {
-		let idCounter = 1;
-		const interactiveTags = new Set(['a', 'button', 'input', 'textarea', 'select', 'details', 'summary']);
+       let idCounter = 1;
+       const interactiveTags = new Set(['a', 'button', 'input', 'textarea', 'select', 'details', 'summary']);
 
-		document.querySelectorAll('[data-ai-id]').forEach(el => el.removeAttribute('data-ai-id'));
+       // Очистка старых ID, если есть
+       document.querySelectorAll('[data-ai-id]').forEach(el => el.removeAttribute('data-ai-id'));
 
-		function cleanText(text) {
-			return (text || '').replace(/\s+/g, ' ').trim();
-		}
+       function cleanText(text) {
+          if (!text) return '';
+          let res = text.replace(/\s+/g, ' ').trim();
+          // Ограничиваем длину текста, чтобы не забивать контекст LLM
+          if (res.length > 100) {
+             return res.slice(0, 100) + '...';
+          }
+          return res;
+       }
 
-		function isVisible(el) {
-			if (!el || !el.getBoundingClientRect) return false;
+       function isVisible(el) {
+          if (!el || !el.getBoundingClientRect) return false;
 
-			const ariaHidden = el.getAttribute('aria-hidden');
-			if (ariaHidden === 'true') return false;
+          const ariaHidden = el.getAttribute('aria-hidden');
+          if (ariaHidden === 'true') return false;
 
-			const rect = el.getBoundingClientRect();
-			const style = window.getComputedStyle(el);
+          const rect = el.getBoundingClientRect();
+          const style = window.getComputedStyle(el);
 
-			return rect.width > 0 && rect.height > 0 &&
-				style.visibility !== 'hidden' &&
-				style.display !== 'none' &&
-				style.opacity !== '0';
-		}
+          // Проверка: находится ли элемент во вьюпорте.
+          // Если элемент далеко внизу, он не попадет в дерево, пока агент не проскроллит.
+          const inViewport = (
+             rect.top < window.innerHeight &&
+             rect.bottom > 0 &&
+             rect.left < window.innerWidth &&
+             rect.right > 0
+          );
 
-		function isInteractive(el) {
-			const tag = el.tagName.toLowerCase();
-			const role = (el.getAttribute('role') || '').toLowerCase();
-			const tabIndex = el.getAttribute('tabindex');
+          return rect.width > 0 && rect.height > 0 &&
+             style.visibility !== 'hidden' &&
+             style.display !== 'none' &&
+             style.opacity !== '0' &&
+             inViewport;
+       }
 
-			return interactiveTags.has(tag) ||
-				role === 'button' ||
-				role === 'link' ||
-				role === 'checkbox' ||
-				role === 'menuitem' ||
-				role === 'tab' ||
-				role === 'textbox' ||
-				role === 'combobox' ||
-				role === 'option' ||
-				(tabIndex !== null && tabIndex !== '-1') ||
-				el.onclick != null;
-		}
+       function isInteractive(el) {
+          const tag = el.tagName.toLowerCase();
+          const role = (el.getAttribute('role') || '').toLowerCase();
+          const tabIndex = el.getAttribute('tabindex');
 
-		function escapeAttr(value) {
-			return value.replace(/"/g, '\\"');
-		}
+          return interactiveTags.has(tag) ||
+             role === 'button' ||
+             role === 'link' ||
+             role === 'checkbox' ||
+             role === 'menuitem' ||
+             role === 'tab' ||
+             role === 'textbox' ||
+             role === 'combobox' ||
+             role === 'option' ||
+             (tabIndex !== null && tabIndex !== '-1') ||
+             el.onclick != null;
+       }
 
-		function getContextFlags(el) {
-			let inDialog = false;
-			let inOverlay = false;
+       function escapeAttr(value) {
+          return value.replace(/"/g, '\\"');
+       }
 
-			let cur = el;
-			while (cur && cur !== document.body) {
-				const role = cur.getAttribute('role');
-				const ariaModal = cur.getAttribute('aria-modal');
-				const className = (cur.className && typeof cur.className === 'string') ? cur.className : '';
+       // Упрощенная проверка контекста
+       function getContextFlags(el) {
+          let inDialog = false;
+          let cur = el;
+          while (cur && cur !== document.body) {
+             const role = (cur.getAttribute('role') || '').toLowerCase();
+             const ariaModal = cur.getAttribute('aria-modal');
+             if (role === 'dialog' || role === 'alertdialog' || ariaModal === 'true') {
+                inDialog = true;
+                break;
+             }
+             cur = cur.parentElement;
+          }
+          return { inDialog };
+       }
 
-				if (role === 'dialog' || role === 'alertdialog' || ariaModal === 'true') {
-					inDialog = true;
-				}
-				if (/\bmodal\b|\bdialog\b|\boverlay\b|\bpopup\b/i.test(className)) {
-					inOverlay = true;
-				}
+       function getKind(el) {
+          const tag = el.tagName.toLowerCase();
+          const role = (el.getAttribute('role') || '').toLowerCase();
+          const type = (el.getAttribute('type') || '').toLowerCase();
 
-				cur = cur.parentElement;
-			}
+          if (tag === 'button' || role === 'button') return 'button';
+          if (tag === 'a' || role === 'link') return 'link';
+          if (tag === 'input') {
+             if (type === 'checkbox') return 'checkbox';
+             if (type === 'radio') return 'radio';
+             if (type === 'search') return 'search';
+             return 'input';
+          }
+          return '';
+       }
 
-			return { inDialog, inOverlay };
-		}
+       // Поиск активного модального окна, чтобы начать обход с него (если есть)
+       function findActiveModal() {
+          const selectors = ['[role="dialog"]', '[role="alertdialog"]', '[aria-modal="true"]', '.modal', '.overlay'];
+          const candidates = Array.from(document.querySelectorAll(selectors.join(',')));
+          let best = null;
+          let bestZ = -Infinity;
+          for (const el of candidates) {
+             if (!isVisible(el)) continue;
+             const style = window.getComputedStyle(el);
+             let z = parseInt(style.zIndex || '0', 10);
+             if (Number.isNaN(z)) z = 0;
+             if (z >= bestZ) {
+                bestZ = z;
+                best = el;
+             }
+          }
+          return best;
+       }
 
-		function getKind(el) {
-			const tag = el.tagName.toLowerCase();
-			const role = (el.getAttribute('role') || '').toLowerCase();
-			const type = (el.getAttribute('type') || '').toLowerCase();
+       const activeModal = findActiveModal();
+       // Если есть модалка, фокусируемся на ней, иначе на body
+       const root = activeModal || document.body;
+       let header = activeModal ? "=== ACTIVE DIALOG ===\n" : "";
 
-			if (tag === 'button') return 'button';
-			if (tag === 'a') return 'link';
-			if (tag === 'textarea') return 'textarea';
-			if (tag === 'select') return 'select';
+       function traverse(node, depth) {
+          if (!node) return '';
+          // Ограничение глубины рекурсии
+          if (depth > 20) return '';
 
-			if (tag === 'input') {
-				if (type === 'checkbox') return 'checkbox';
-				if (type === 'radio') return 'radio';
-				if (type === 'search') return 'search';
-				return 'input';
-			}
+          if (node.nodeType === Node.TEXT_NODE) {
+             const text = cleanText(node.textContent);
+             // Игнорируем очень короткий шум
+             if (text.length > 2) {
+                return '  '.repeat(depth) + text + '\n';
+             }
+             return '';
+          }
 
-			if (role === 'button') return 'button';
-			if (role === 'link') return 'link';
-			if (role === 'combobox') return 'combobox';
-			if (role === 'menuitem') return 'menuitem';
-			if (role === 'option') return 'option';
+          if (node.nodeType === Node.ELEMENT_NODE) {
+             const el = node;
+             if (!isVisible(el)) return '';
 
-			return '';
-		}
+             let output = '';
+             const prefix = '  '.repeat(depth);
+             const tag = el.tagName.toLowerCase();
 
-		function buildLabel(el) {
-			const direct = cleanText(el.innerText || el.textContent || '');
-			if (direct) return direct;
+             // Пропускаем "мусорные" теги для экономии
+             if (['script', 'style', 'svg', 'path', 'noscript'].includes(tag)) return '';
 
-			const aria = cleanText(el.getAttribute('aria-label') || '');
-			if (aria) return aria;
+             if (isInteractive(el)) {
+                const aiId = idCounter++;
+                el.setAttribute('data-ai-id', String(aiId));
 
-			const title = cleanText(el.getAttribute('title') || '');
-			if (title) return title;
+                const parts = ['<' + tag];
+                
+                // Собираем Label
+                let label = cleanText(el.innerText || el.textContent || '');
+                if (!label) label = cleanText(el.getAttribute('aria-label') || '');
+                if (!label) label = cleanText(el.getAttribute('title') || '');
+                if ((tag === 'input' || tag === 'textarea') && !label) {
+                   label = cleanText(el.getAttribute('placeholder') || '');
+                }
 
-			if (el.tagName.toLowerCase() === 'input' || el.tagName.toLowerCase() === 'textarea') {
-				const ph = cleanText(el.getAttribute('placeholder') || '');
-				if (ph) return ph;
-			}
+                if (label) parts.push('label="' + escapeAttr(label) + '"');
 
-			return '';
-		}
+                const kind = getKind(el);
+                if (kind) parts.push('kind="' + kind + '"');
 
-		function getRegion(el) {
-			let cur = el;
-			while (cur && cur !== document.body) {
-				const tag = cur.tagName.toLowerCase();
-				const role = (cur.getAttribute('role') || '').toLowerCase();
-				const className = (cur.className && typeof cur.className === 'string')
-					? cur.className.toLowerCase()
-					: '';
+                const ctx = getContextFlags(el);
+                if (ctx.inDialog) parts.push('context="dialog"');
+                
+                // Добавляем value для инпутов
+                if (tag === 'input' || tag === 'textarea') {
+                    const val = cleanText(el.value);
+                    if (val) parts.push('value="' + escapeAttr(val) + '"');
+                }
 
-				if (tag === 'header' || role === 'banner' ||
-					/\b(header|top-nav|navbar|site-header)\b/.test(className)) {
-					return 'header';
-				}
+                output += prefix + '[' + aiId + '] ' + parts.join(' ') + '>\n';
+             } else {
+                // Рендерим только структурные теги или если внутри есть текст
+                // Заголовки рендерим всегда с текстом
+                if (['h1','h2','h3','h4','h5'].includes(tag)) {
+                    const hText = cleanText(el.innerText);
+                    output += prefix + '<' + tag + '> ' + hText + '\n';
+                } else if (['div', 'p', 'span', 'section', 'li', 'ul', 'form'].includes(tag)) {
+                    // Просто контейнер, идем внутрь
+                    // Можно вывести тег, чтобы LLM понимала структуру, но без атрибутов
+                    // output += prefix + '<' + tag + '>\n'; 
+                    // (Для экономии токенов часто лучше опускать div, если он не интерактивный, 
+                    // но тогда теряется структура. Оставим вывод тега, если он важен)
+                    // В данной версии для макс. экономии НЕ выводим пустые div-ы в строку, 
+                    // просто рекурсивно идем внутрь.
+                }
+             }
 
-				if (tag === 'footer' || role === 'contentinfo' ||
-					/\b(footer|site-footer)\b/.test(className)) {
-					return 'footer';
-				}
+             for (const child of el.childNodes) {
+                output += traverse(child, depth+1);
+             }
 
-				cur = cur.parentElement;
-			}
-			return 'main';
-		}
+             return output;
+          }
+          return '';
+       }
 
-		function findActiveModal() {
-			const selectors = [
-				'[role="dialog"]',
-				'[role="alertdialog"]',
-				'[aria-modal="true"]',
-				'[data-testid*="modal"]',
-				'.modal', '.Modal',
-				'.overlay', '.Overlay',
-				'.popup', '.Popup',
-				'.dialog', '.Dialog'
-			];
-			const candidates = Array.from(
-				document.querySelectorAll(selectors.join(','))
-			);
-
-			let best = null;
-			let bestZ = -Infinity;
-
-			for (const el of candidates) {
-				if (!isVisible(el)) continue;
-				const style = window.getComputedStyle(el);
-				let z = parseInt(style.zIndex || '0', 10);
-				if (Number.isNaN(z)) z = 0;
-				if (z >= bestZ) {
-					bestZ = z;
-					best = el;
-				}
-			}
-			return best;
-		}
-
-		const activeModal = findActiveModal();
-		const root = activeModal || document.body;
-
-		let header = "";
-		if (activeModal) {
-			header = "=== ACTIVE DIALOG ===\n";
-		}
-
-		function traverse(node, depth) {
-			if (!node) return '';
-
-			if (node.nodeType === Node.TEXT_NODE) {
-				const text = cleanText(node.textContent);
-				if (text.length > 0) {
-					return '  '.repeat(depth) + text + '\n';
-				}
-				return '';
-			}
-
-			if (node.nodeType === Node.ELEMENT_NODE) {
-				const el = node;
-
-				if (!isVisible(el)) return '';
-
-				let output = '';
-				const prefix = '  '.repeat(depth);
-				const tag = el.tagName.toLowerCase();
-
-				if (isInteractive(el)) {
-					const aiId = idCounter++;
-
-					el.setAttribute('data-ai-id', String(aiId));
-
-					const label = buildLabel(el);
-					const parts = ['<' + tag];
-
-					if (label) {
-						const shortLabel = label.length > 160 ? label.slice(0, 160) + '...' : label;
-						parts.push('label="' + escapeAttr(shortLabel) + '"');
-					}
-
-					const kind = getKind(el);
-					if (kind) {
-						parts.push('kind="' + escapeAttr(kind) + '"');
-					}
-
-					const ctx = getContextFlags(el);
-					if (ctx.inDialog || ctx.inOverlay) {
-						parts.push('context="dialog"');
-					}
-
-					const region = getRegion(el);
-					parts.push('region="' + escapeAttr(region) + '"');
-
-					if (tag === 'input' || tag === 'textarea') {
-						const value = cleanText(el.value || '');
-						const placeholder = cleanText(el.getAttribute('placeholder') || '');
-						if (value) {
-							parts.push('value="' + escapeAttr(value) + '"');
-						}
-						if (placeholder) {
-							parts.push('placeholder="' + escapeAttr(placeholder) + '"');
-						}
-						const inputType = el.getAttribute('type');
-						if (inputType) {
-							parts.push('type="' + escapeAttr(inputType) + '"');
-						}
-					}
-
-					if (tag === 'a') {
-						const href = el.getAttribute('href');
-						if (href) {
-							const shortHref = href.length > 160 ? href.slice(0, 160) + '...' : href;
-							parts.push('href="' + escapeAttr(shortHref) + '"');
-						}
-					}
-
-					output += prefix + '[' + aiId + '] ' + parts.join(' ') + '>\n';
-				} else {
-					if (['h1','h2','h3','h4','h5'].includes(tag)) {
-						const headingText = cleanText(el.innerText || el.textContent || '');
-						if (headingText) {
-							const shortHeading = headingText.length > 160 ? headingText.slice(0, 160) + '...' : headingText;
-							output += prefix + '<' + tag + '> ' + shortHeading + '\n';
-						}
-					}
-				}
-
-				for (const child of el.childNodes) {
-					output += traverse(child, depth+1);
-				}
-
-				return output;
-			}
-
-			return '';
-		}
-
-		return header + traverse(root, 0);
-	}`
+       return header + traverse(root, 0);
+    }`
 
 	result, err := m.Page.Evaluate(script)
 	if err != nil {
@@ -300,18 +235,22 @@ func (m *Manager) Snapshot() (*PageSnapshot, error) {
 		return nil, fmt.Errorf("expected string from js, got %T", result)
 	}
 
+	// Проверяем наличие маркеров корзины для отладки
 	if strings.Contains(treeStr, "Sepete git") {
 		fmt.Println("DEBUG: cart button 'Sepete git' IS present in snapshot")
 	} else {
-		fmt.Println("DEBUG: cart button 'Sepete git' NOT found in snapshot")
+		// fmt.Println("DEBUG: cart button 'Sepete git' NOT found in snapshot")
 	}
 
 	title, _ := m.Page.Title()
 
-	// Full-page screenshot → base64
+	// Full-page скриншот отключен для экономии токенов и ускорения.
+	// Используем JPEG с качеством 70.
 	var screenshotB64 string
 	if buf, errShot := m.Page.Screenshot(playwright.PageScreenshotOptions{
-		FullPage: playwright.Bool(true),
+		FullPage: playwright.Bool(false),
+		Type:     playwright.ScreenshotTypeJpeg,
+		Quality:  playwright.Int(70),
 	}); errShot == nil {
 		screenshotB64 = base64.StdEncoding.EncodeToString(buf)
 	} else {
