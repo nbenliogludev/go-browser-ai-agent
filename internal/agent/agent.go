@@ -31,10 +31,16 @@ func (a *Agent) Run(task string, maxSteps int) error {
 	for step := 1; step <= maxSteps; step++ {
 		fmt.Printf("\n--- STEP %d ---\n", step)
 
+		// Ждем NetworkIdle, но не слишком жестко, чтобы не висеть на стриминге
+		// Можно изменить на LoadStateDomcontentloaded для скорости
 		state := playwright.LoadState(browser.LoadStateNetworkidle)
-		a.browser.Page.WaitForLoadState(playwright.PageWaitForLoadStateOptions{
-			State: &state,
-		})
+		tryWait := func() {
+			a.browser.Page.WaitForLoadState(playwright.PageWaitForLoadStateOptions{
+				State:   &state,
+				Timeout: playwright.Float(4000), // Не ждем вечно
+			})
+		}
+		tryWait()
 
 		snapshot, err := a.browser.Snapshot()
 		if err != nil {
@@ -47,13 +53,12 @@ func (a *Agent) Run(task string, maxSteps int) error {
 		if len(preview) > 500 {
 			preview = preview[:500] + "..."
 		}
-		fmt.Printf("Tree preview:\n%s\n", preview)
+		fmt.Printf("Tree preview (Viewport only):\n%s\n", preview)
 
 		histStr := mem.HistoryString()
 
-		// Динамическое уточнение задачи (фокус на корзину, если были лупы)
+		// Динамическое уточнение задачи
 		effectiveTask := task
-
 		taskLower := strings.ToLower(task)
 		wantsCart :=
 			strings.Contains(taskLower, "корзин") ||
@@ -62,14 +67,11 @@ func (a *Agent) Run(task string, maxSteps int) error {
 				strings.Contains(taskLower, "checkout") ||
 				strings.Contains(taskLower, "sepet")
 
-		hasDialog := strings.Contains(snapshot.Tree, `context="dialog"`)
-
-		if wantsCart && mem.LoopTriggered() && !hasDialog {
+		// Если агент тупит и хочет корзину, но продолжает добавлять — даем подсказку
+		if wantsCart && mem.LoopTriggered() {
 			effectiveTask = task + `
 
-NOTE: It looks like the requested item has already been added or the "add to cart"
-action was repeated in a loop. From now on, DO NOT try to add the same item again.
-Focus ONLY on opening the cart/basket/checkout page and proceeding there.`
+NOTE: If the item is already added, STOP adding it. Focus ONLY on finding the cart/basket icon in the header or footer.`
 		}
 
 		decision, err := a.llm.DecideAction(llm.DecisionInput{
@@ -92,7 +94,6 @@ Focus ONLY on opening the cart/basket/checkout page and proceeding there.`
 			fmt.Printf("⛔ LOOP GUARD: suppressing action %s on target %d\n",
 				decision.Action.Type, decision.Action.TargetID)
 			if reason != "" {
-				fmt.Println(reason)
 				mem.AddSystemNote(reason)
 			}
 			mem.MarkLoopTriggered()
@@ -112,6 +113,7 @@ Focus ONLY on opening the cart/basket/checkout page and proceeding there.`
 			mem.Add(step, snapshot.URL, decision.Action)
 		}
 
+		// Пауза, чтобы сайт успел отреагировать
 		time.Sleep(2 * time.Second)
 	}
 
@@ -119,53 +121,40 @@ Focus ONLY on opening the cart/basket/checkout page and proceeding there.`
 }
 
 func (a *Agent) executeAction(reader *bufio.Reader, action llm.Action) error {
-	// Навигацию по URL не делаем вообще — только клики.
 	if action.Type == llm.ActionNavigate {
-		fmt.Println("⚠ navigate action is disabled, ignoring (navigation must be via clicks).")
+		fmt.Println("⚠ navigate action is disabled, ignoring.")
 		return nil
 	}
 
 	selector := fmt.Sprintf("[data-ai-id='%d']", action.TargetID)
 
-	// Немного дебага — какой элемент
-	if action.Type == llm.ActionClick || action.Type == llm.ActionTypeInput {
-		htmlAny, _ := a.browser.Page.Evaluate(
-			`(sel) => {
-				const el = document.querySelector(sel);
-				if (!el) return null;
-				let s = el.outerHTML || "";
-				if (s.length > 400) s = s.slice(0, 400) + "...";
-				return s;
-			}`,
-			selector,
-		)
-		if htmlAny != nil {
-			if htmlStr, ok := htmlAny.(string); ok && htmlStr != "" {
-				fmt.Printf("🔍 DEBUG element for %s:\n%s\n", selector, htmlStr)
-			} else {
-				fmt.Printf("🔍 DEBUG element for %s: <nil or non-string>\n", selector)
-			}
-		} else {
-			fmt.Printf("🔍 DEBUG element for %s: not found\n", selector)
-		}
-	}
-
+	// Подсветка и дебаг
 	if action.Type == llm.ActionClick || action.Type == llm.ActionTypeInput {
 		a.highlight(selector)
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(300 * time.Millisecond)
 	}
 
 	switch action.Type {
 	case llm.ActionClick:
 		fmt.Printf("Clicking %s...\n", selector)
-		if err := a.browser.Page.Locator(selector).First().ScrollIntoViewIfNeeded(); err != nil {
-			return fmt.Errorf("scroll failed: %w", err)
-		}
-		return a.browser.Page.Click(selector)
+		locator := a.browser.Page.Locator(selector).First()
+
+		// Пытаемся проскроллить
+		_ = locator.ScrollIntoViewIfNeeded()
+
+		// Force: true позволяет нажимать, даже если элемент перекрыт (например, прозрачным оверлеем)
+		return locator.Click(playwright.LocatorClickOptions{
+			Force:   playwright.Bool(true),
+			Timeout: playwright.Float(5000),
+		})
 
 	case llm.ActionTypeInput:
 		fmt.Printf("Typing '%s' into %s (Submit=%v)...\n", action.Text, selector, action.Submit)
-		if err := a.browser.Page.Fill(selector, action.Text); err != nil {
+		// Для инпутов тоже полезно проскроллить
+		locator := a.browser.Page.Locator(selector).First()
+		_ = locator.ScrollIntoViewIfNeeded()
+
+		if err := locator.Fill(action.Text); err != nil {
 			return err
 		}
 		if action.Submit {
@@ -184,19 +173,11 @@ func (a *Agent) executeAction(reader *bufio.Reader, action llm.Action) error {
 
 func (a *Agent) highlight(selector string) {
 	script := fmt.Sprintf(`
-		const el = document.querySelector("%s");
-		if (el) {
-			el.style.outline = "5px solid red";
-			el.style.zIndex = "999999";
-			el.scrollIntoView({behavior: "smooth", block: "center", inline: "center"});
-		}
-	`, selector)
+       const el = document.querySelector("%s");
+       if (el) {
+          el.style.outline = "4px solid red";
+          el.style.zIndex = "2147483647"; // Max z-index
+       }
+    `, selector)
 	_, _ = a.browser.Page.Evaluate(script)
-}
-
-// на будущее: если захочется подтверждений от человека — можно использовать
-func askConfirmation(reader *bufio.Reader, msg string) bool {
-	fmt.Print(msg + " [y/N]: ")
-	res, _ := reader.ReadString('\n')
-	return strings.TrimSpace(strings.ToLower(res)) == "y"
 }
