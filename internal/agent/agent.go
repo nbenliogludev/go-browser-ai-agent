@@ -25,9 +25,7 @@ func NewAgent(b *browser.Manager, c llm.Client) *Agent {
 func (a *Agent) Run(task string, maxSteps int) error {
 	reader := bufio.NewReader(os.Stdin)
 
-	// Память шагов: история + защита от циклов и повторяющихся паттернов.
-	// maxLines=8, loopThreshold=3 → одно и то же действие больше 3 раз подряд запрещаем,
-	// плюс детект паттернов из двух действий.
+	// Память шагов: история + защита от циклов.
 	mem := NewStepMemory(8, 3)
 
 	for step := 1; step <= maxSteps; step++ {
@@ -53,38 +51,33 @@ func (a *Agent) Run(task string, maxSteps int) error {
 
 		histStr := mem.HistoryString()
 
-		// --------- Динамическое уточнение задачи (phase control) ---------
-		// Никаких правок system prompt — только user-task.
+		// Динамическое уточнение задачи (фокус на корзину, если были лупы)
 		effectiveTask := task
 
 		taskLower := strings.ToLower(task)
 		wantsCart :=
-			strings.Contains(taskLower, "корзин") || // рус. "корзина"
+			strings.Contains(taskLower, "корзин") ||
 				strings.Contains(taskLower, "cart") ||
 				strings.Contains(taskLower, "basket") ||
 				strings.Contains(taskLower, "checkout") ||
-				strings.Contains(taskLower, "sepet") // тур. "sepet", "sepete"
+				strings.Contains(taskLower, "sepet")
 
 		hasDialog := strings.Contains(snapshot.Tree, `context="dialog"`)
 
-		// Если уже была попытка повторяющегося паттерна (loop guard сработал),
-		// пользователь явно просил "перейти в корзину",
-		// и при этом мы не в модалке — пора перестать думать про "добавление"
-		// и сфокусироваться на переходе в корзину/checkout.
 		if wantsCart && mem.LoopTriggered() && !hasDialog {
 			effectiveTask = task + `
-			
+
 NOTE: It looks like the requested item has already been added or the "add to cart"
 action was repeated in a loop. From now on, DO NOT try to add the same item again.
 Focus ONLY on opening the cart/basket/checkout page and proceeding there.`
 		}
-		// -----------------------------------------------------------------
 
 		decision, err := a.llm.DecideAction(llm.DecisionInput{
-			Task:       effectiveTask,
-			DOMTree:    snapshot.Tree,
-			CurrentURL: snapshot.URL,
-			History:    histStr,
+			Task:             effectiveTask,
+			DOMTree:          snapshot.Tree,
+			CurrentURL:       snapshot.URL,
+			History:          histStr,
+			ScreenshotBase64: snapshot.ScreenshotBase64,
 		})
 		if err != nil {
 			return fmt.Errorf("llm error: %w", err)
@@ -94,9 +87,7 @@ Focus ONLY on opening the cart/basket/checkout page and proceeding there.`
 		fmt.Printf("⚡ ACTION: %s [%d] %q\n",
 			decision.Action.Type, decision.Action.TargetID, decision.Action.Text)
 
-		// Жёсткая защита от зацикливания:
-		// если модель снова хочет воспроизвести тот же action или тот же паттерн,
-		// мы его не выполняем и добавляем SYSTEM NOTE в историю.
+		// Жёсткая защита от зацикливания
 		if blocked, reason := mem.ShouldBlock(snapshot.URL, decision.Action); blocked {
 			fmt.Printf("⛔ LOOP GUARD: suppressing action %s on target %d\n",
 				decision.Action.Type, decision.Action.TargetID)
@@ -104,8 +95,6 @@ Focus ONLY on opening the cart/basket/checkout page and proceeding there.`
 				fmt.Println(reason)
 				mem.AddSystemNote(reason)
 			}
-			// отмечаем, что защита от цикла уже срабатывала —
-			// это потом используем для смены "фазы" (добавление -> переход в корзину)
 			mem.MarkLoopTriggered()
 
 			time.Sleep(1 * time.Second)
@@ -120,7 +109,6 @@ Focus ONLY on opening the cart/basket/checkout page and proceeding there.`
 		if err := a.executeAction(reader, decision.Action); err != nil {
 			log.Printf("Action failed: %v. Retrying...", err)
 		} else {
-			// в память попадают только успешно выполненные действия
 			mem.Add(step, snapshot.URL, decision.Action)
 		}
 
@@ -131,7 +119,7 @@ Focus ONLY on opening the cart/basket/checkout page and proceeding there.`
 }
 
 func (a *Agent) executeAction(reader *bufio.Reader, action llm.Action) error {
-	// навигацию по URL не делаем вообще
+	// Навигацию по URL не делаем вообще — только клики.
 	if action.Type == llm.ActionNavigate {
 		fmt.Println("⚠ navigate action is disabled, ignoring (navigation must be via clicks).")
 		return nil
@@ -139,7 +127,7 @@ func (a *Agent) executeAction(reader *bufio.Reader, action llm.Action) error {
 
 	selector := fmt.Sprintf("[data-ai-id='%d']", action.TargetID)
 
-	// немного дебага — по какому элементу идём кликать/печатать
+	// Немного дебага — какой элемент
 	if action.Type == llm.ActionClick || action.Type == llm.ActionTypeInput {
 		htmlAny, _ := a.browser.Page.Evaluate(
 			`(sel) => {
@@ -206,6 +194,7 @@ func (a *Agent) highlight(selector string) {
 	_, _ = a.browser.Page.Evaluate(script)
 }
 
+// на будущее: если захочется подтверждений от человека — можно использовать
 func askConfirmation(reader *bufio.Reader, msg string) bool {
 	fmt.Print(msg + " [y/N]: ")
 	res, _ := reader.ReadString('\n')

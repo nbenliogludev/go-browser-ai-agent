@@ -6,8 +6,7 @@ import (
 	"strings"
 )
 
-// BuildTaskWithEnvironment добавляет к пользовательской задаче контекст про стартовый URL.
-// Никакого хардкода под конкретные сайты: только домен и начальный путь.
+// BuildTaskWithEnvironment добавляет к пользовательской задаче контекст про домен и стартовый путь.
 func BuildTaskWithEnvironment(rawTask, startURL string) string {
 	u, err := url.Parse(startURL)
 	if err != nil || u.Host == "" {

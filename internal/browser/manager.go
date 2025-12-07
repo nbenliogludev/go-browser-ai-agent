@@ -30,6 +30,7 @@ func NewManager() (*Manager, error) {
 		return nil, fmt.Errorf("start pw failed: %w", err)
 	}
 
+	// user-data-dir в текущей папке проекта
 	userDataDir, _ := os.Getwd()
 	userDataDir = filepath.Join(userDataDir, ".playwright_data")
 
@@ -46,7 +47,7 @@ func NewManager() (*Manager, error) {
 		},
 	)
 	if err != nil {
-		pw.Stop()
+		_ = pw.Stop()
 		return nil, err
 	}
 
@@ -57,12 +58,13 @@ func NewManager() (*Manager, error) {
 	} else {
 		page, err = context.NewPage()
 		if err != nil {
-			context.Close()
-			pw.Stop()
+			_ = context.Close()
+			_ = pw.Stop()
 			return nil, fmt.Errorf("failed to create page: %w", err)
 		}
 	}
 
+	// Попытка развернуть окно
 	if _, err := page.Evaluate(`window.moveTo(0, 0); window.resizeTo(screen.availWidth, screen.availHeight);`); err != nil {
 		fmt.Printf("Warning: failed to resize window via JS: %v\n", err)
 	}

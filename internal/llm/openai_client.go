@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	openai "github.com/sashabaranov/go-openai"
 )
@@ -16,195 +17,171 @@ type OpenAIClient struct {
 func NewOpenAIClient() (*OpenAIClient, error) {
 	apiKey := os.Getenv("OPENAI_API_KEY")
 	if apiKey == "" {
-		return nil, fmt.Errorf("OPENAI_API_KEY is not set")
+		return nil, fmt.Errorf("OPENAI_API_KEY not set")
 	}
-	client := openai.NewClient(apiKey)
-	return &OpenAIClient{client: client}, nil
+
+	c := openai.NewClient(apiKey)
+	return &OpenAIClient{client: c}, nil
 }
 
-const systemPrompt = `
-You are an autonomous browser agent.
+const visionSystemPrompt = `
+You are a STRICT web-browsing control agent.
 
-You receive a textual representation of the current page (DOM tree).
-Interactive elements are shown like:
-  [12] <button label="Sepete ekle" kind="button" context="dialog">
-  [25] <a label="Pizza" kind="link" href="/yemek/restoranlar/?cuisines=...">
+You receive:
+1) A natural-language USER TASK (already enriched with domain and start-path hints).
+2) The CURRENT URL.
+3) A DOM SUMMARY that contains only visible and interactive elements and headings.
+   - Interactive elements are annotated as: [ID] <tag ... label="..." kind="..." context="dialog" region="...">
+   - The "ID" inside [] is a numeric "data-ai-id" attribute that you must use as "target_id".
+4) A brief HISTORY of previous actions and SYSTEM NOTES.
+5) A SCREENSHOT of the full page (vision input).
 
-Non-interactive lines are just plain text / headings.
+Your job:
+- Decide EXACTLY ONE next low-level browser action.
+- Use BOTH the screenshot and DOM summary.
+- Use the history and system notes to avoid repeating the same actions or patterns.
 
-ATTRIBUTES
-- label="..."      — text visible to user: button caption, link text, placeholder etc.
-- kind="..."       — button, link, input, textarea, select, combobox, menuitem, option, ...
-- context="dialog" — element is inside an active dialog / modal. 
-                     When a dialog is open, the DOM tree usually contains ONLY this dialog.
+ALLOWED ACTION TYPES (JSON field "type"):
+- "click"  : Click on an interactive element.
+- "type"   : Type text into an input/textarea and optionally press Enter.
+- "finish" : Stop. The global user task is considered done or cannot be progressed further.
 
-IMPORTANT: YOU CANNOT NAVIGATE BY URL.
-You must never invent or use URLs directly. All navigation must be done by
-clicking interactive elements (links, buttons, menu items, etc.) or typing
-into fields and pressing Enter when needed.
+IMPORTANT HARD RULES:
+- "navigate" or any other action types are NOT allowed. If you want to navigate, you must do it
+  by clicking appropriate links/buttons in the DOM using "click".
+- "target_id" MUST match one of the numeric IDs from the DOM summary (the numbers inside square
+  brackets like [37]). If you cannot find a good target, choose "finish".
+- For "type":
+  - "target_id" must correspond to an input-like element (input, textarea, search field).
+  - "text" MUST be non-empty.
+  - Set "submit": true ONLY if pressing Enter is the right thing to do (e.g. search fields).
+- For "finish":
+  - You MUST NOT provide "target_id" or "text" or "submit"; they will be ignored.
 
-A dialog (modal):
-- If the tree starts with a line like "=== ACTIVE DIALOG ===" or elements have context="dialog",
-  that means a modal is open.
-- While a dialog is open, you must finish the flow inside it (choose required options,
-  click the primary button like "Sepete ekle", "Add to cart", "Confirm", etc.)
-  before interacting with anything else.
+E-COMMERCE / ADD-TO-CART BEHAVIOR:
+- If the user asks to "add ONE item to the cart" (e.g. a single pizza or product),
+  you MUST add EXACTLY ONE best-matching item.
+- Do NOT add multiple similar items, extra menus or combos unless the instruction explicitly
+  asks for more than one (e.g. "две пиццы", "3 burgers").
+- After an item is added:
+  - The dialog/modal usually closes OR quantity/cart subtotal changes.
+  - When you SEE (from screenshot + DOM) that the requested item is clearly in the cart
+    or the subtotal has increased accordingly, DO NOT click the "add to cart" button again.
+  - Instead:
+    - If the original task ALSO asked to open the cart/checkout, then click the cart/basket button.
+    - Otherwise choose "finish".
 
-ALLOWED ACTIONS:
-You ONLY have these action types:
-- "click"  — click on an interactive element by its numeric id.
-- "type"   — type text into an input/textarea by id (optionally press Enter).
-- "finish" — stop when the task is reasonably completed or cannot be completed automatically.
+LOOP PREVENTION:
+- HISTORY contains "SYSTEM NOTE" messages and logs of previous actions (step, url, action).
+- If the history says that a certain action or pattern MUST NOT be repeated (for example
+  same click on the same target, or repeating a sequence), you MUST obey that.
+- If you are blocked from doing any further meaningful progress, choose "finish".
 
-RESPONSE FORMAT (STRICT):
-Return a SINGLE JSON object:
+DIALOG/MODAL HANDLING:
+- DOM summary may start with "=== ACTIVE DIALOG ===" when a modal is focused.
+- If a dialog is active:
+  - Prefer to complete the dialog (choose options, then press the primary confirm/add button).
+  - Do NOT click outside elements until the dialog is done or closed.
+- When the dialog disappears after your action, you should assume that its goal (like adding
+  an item) has been completed.
+
+OUTPUT FORMAT (STRICT):
+Respond ONLY with a single JSON object, NO markdown, NO code fences, NO extra text.
+Schema:
+
 {
-  "thought": "Brief reasoning about current state and the next step",
-  "step_done": false,
+  "thought": "short explanation of your reasoning",
+  "step_done": true or false,
   "action": {
     "type": "click" | "type" | "finish",
-    "target_id": 12,        // integer id from the tree (for click/type)
-    "text": "some text",    // only for type
-    "submit": true          // if true, press Enter after typing
+    "target_id": <number>,     // required for "click" and "type"
+    "text": "string",          // required only for "type"
+    "submit": true | false     // optional, only for "type"
   }
 }
-
-- "thought" must be a short explanation of why you chose this exact next step.
-- "action" must describe exactly ONE next atomic action.
-- "step_done" is a boolean flag:
-    * false — the current immediate sub-goal (described in the user message,
-      for example the CURRENT PLAN STEP) is NOT fully completed yet.
-    * true  — the current immediate sub-goal is completed and the orchestrator
-      is allowed to move to the next high-level plan step.
-
-Examples of when to set "step_done" to true:
-- You have already added the requested item to the cart and the page state reflects it
-  (cart value updated, dialog closed, quantity is correct).
-- You have finished filling and submitting the required form.
-- You have completed the current high-level step and further repetitions would be redundant.
-
-GUIDELINES:
-
-1) Navigation and search
-   - To change page/section, click links/buttons in the DOM tree.
-   - For search, type into the search input (kind="input" or "search") and set submit=true
-     so that Enter is pressed.
-
-2) Dialogs / modals
-   - When a dialog is shown (context="dialog" or "=== ACTIVE DIALOG ==="),
-     focus only on elements inside it.
-   - Typical steps:
-       * if there are required choices (selects, options), click them first;
-       * then click the primary confirming button (often at the bottom, with a price or
-         label like "Sepete ekle", "Add", "Confirm").
-   - Do not click background elements visible behind the dialog.
-
-3) Selects / dropdowns / options
-   - For selects or comboboxes:
-       * First click the select field (kind="select" or "combobox") to open options.
-       * On the next step click an option (kind="menuitem" or "option") whose label matches
-         the desired choice.
-       * Repeat until all important fields are filled.
-
-4) Avoid loops
-   - Do not repeat the exact same click / type on the same page if it didn't change anything.
-   - Do NOT repeatedly execute the same short pattern of actions (for example, opening
-     the same card and pressing the same primary button again and again).
-   - If the history contains "SYSTEM NOTE" lines about loops or forbidden actions/patterns,
-     you MUST obey them: do NOT repeat such actions or patterns.
-   - If after several reasonable attempts the flow clearly requires human actions
-     (e.g. complex payment), use "finish" and explain the situation in the thought.
-
-5) Single-commit interactions and carts
-   - Many tasks involve adding ONE item to a cart or confirming ONE dialog.
-   - If the user request is singular (e.g. "добавь в корзину пиццу", "add a pizza to the cart",
-     "put this product into the basket"), you must add exactly ONE best matching item.
-   - After you have clicked a primary confirm/add button (often inside a dialog) and the page
-     clearly reflects the change (dialog disappears, cart/subtotal updated, etc.):
-       * treat the current immediate sub-goal as completed;
-       * set "step_done" to true for the CURRENT PLAN STEP;
-       * do NOT open additional menus or products of the same kind;
-       * do NOT add more of the same item unless the user explicitly requested multiple items
-         ("две пиццы", "3 items", etc.).
-
-HISTORY MAY CONTAIN SYSTEM NOTES:
-- Some history lines may start with "SYSTEM NOTE:".
-- These are constraints from the environment (for example, detected loops or that a dialog
-  was already closed for this step).
-- You MUST treat them as hard constraints: avoid repeating forbidden actions or patterns
-  and prefer choosing a different path or finish if the user goal already looks achieved
-  (for example, the cart clearly shows the desired item and quantity).
-
-Remember: no direct URL navigation. Everything is done via clicks and typing based on the DOM tree only.
 `
 
 func (c *OpenAIClient) DecideAction(input DecisionInput) (*DecisionOutput, error) {
-	userMessage := fmt.Sprintf(`
-USER TASK (for this step or sub-goal):
-%s
-
-CURRENT URL:
-%s
-
-PREVIOUS STEPS (summary, optional):
-%s
-
-PAGE TREE:
-%s
-`, input.Task, input.CurrentURL, input.History, input.DOMTree)
-
-	// Guard against too long prompt
-	if len(userMessage) > 60000 {
-		userMessage = userMessage[:60000] + "\n... (truncated)"
-	}
-
 	ctx := context.Background()
 
+	var sb strings.Builder
+	sb.WriteString("USER TASK:\n")
+	sb.WriteString(input.Task)
+	sb.WriteString("\n\nCURRENT URL:\n")
+	sb.WriteString(input.CurrentURL)
+
+	if input.History != "" {
+		sb.WriteString("\n\nRECENT HISTORY:\n")
+		sb.WriteString(input.History)
+	}
+
+	sb.WriteString("\n\nDOM SUMMARY:\n")
+	sb.WriteString(input.DOMTree)
+
+	textPart := openai.ChatMessagePart{
+		Type: openai.ChatMessagePartTypeText,
+		Text: sb.String(),
+	}
+
+	parts := []openai.ChatMessagePart{textPart}
+
+	if input.ScreenshotBase64 != "" {
+		parts = append(parts, openai.ChatMessagePart{
+			Type: openai.ChatMessagePartTypeImageURL,
+			ImageURL: &openai.ChatMessageImageURL{
+				URL: "data:image/png;base64," + input.ScreenshotBase64,
+			},
+		})
+	}
+
 	req := openai.ChatCompletionRequest{
-		Model: openai.GPT4oMini,
+		Model: "gpt-4o", // vision + JSON
 		Messages: []openai.ChatCompletionMessage{
 			{
 				Role:    openai.ChatMessageRoleSystem,
-				Content: systemPrompt,
+				Content: visionSystemPrompt,
 			},
 			{
-				Role:    openai.ChatMessageRoleUser,
-				Content: userMessage,
+				Role:         openai.ChatMessageRoleUser,
+				MultiContent: parts,
 			},
 		},
 		ResponseFormat: &openai.ChatCompletionResponseFormat{
 			Type: openai.ChatCompletionResponseFormatTypeJSONObject,
 		},
+		Temperature: 0.2,
 	}
 
 	resp, err := c.client.CreateChatCompletion(ctx, req)
 	if err != nil {
-		return nil, fmt.Errorf("OpenAI error: %w", err)
+		return nil, fmt.Errorf("OpenAI vision error: %w", err)
 	}
 
 	if len(resp.Choices) == 0 {
-		return nil, fmt.Errorf("no response choices")
+		return nil, fmt.Errorf("vision model returned no choices")
 	}
 
 	content := resp.Choices[0].Message.Content
 
-	var output DecisionOutput
-	if err := json.Unmarshal([]byte(content), &output); err != nil {
-		return nil, fmt.Errorf("json parse error: %w | content: %s", err, content)
+	var out DecisionOutput
+	if err := json.Unmarshal([]byte(content), &out); err != nil {
+		return nil, fmt.Errorf("vision JSON parse error: %w | raw: %s", err, content)
 	}
 
-	// Safety post-processing: navigation by raw URL is not allowed at this level
-	if output.Action.Type == ActionNavigate {
-		if output.Action.TargetID != 0 {
-			output.Thought += " | SYSTEM: 'navigate' is not allowed; converted to 'click' on the same target."
-			output.Action.Type = ActionClick
-			output.Action.URL = ""
-		} else {
-			output.Thought += " | SYSTEM: 'navigate' is not allowed and has no target; finishing."
-			output.Action.Type = ActionFinish
-			output.Action.URL = ""
-		}
+	switch out.Action.Type {
+	case ActionClick, ActionTypeInput, ActionFinish:
+	default:
+		out.Action.Type = ActionFinish
+		out.Action.TargetID = 0
+		out.Action.Text = ""
+		out.Action.Submit = false
 	}
 
-	return &output, nil
+	if out.Action.Type == ActionFinish {
+		out.Action.TargetID = 0
+		out.Action.Text = ""
+		out.Action.Submit = false
+	}
+
+	return &out, nil
 }

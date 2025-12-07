@@ -1,14 +1,18 @@
 package browser
 
 import (
+	"encoding/base64"
 	"fmt"
 	"strings"
+
+	"github.com/playwright-community/playwright-go"
 )
 
 type PageSnapshot struct {
-	URL   string
-	Title string
-	Tree  string
+	URL              string
+	Title            string
+	Tree             string
+	ScreenshotBase64 string
 }
 
 func (m *Manager) Snapshot() (*PageSnapshot, error) {
@@ -20,7 +24,6 @@ func (m *Manager) Snapshot() (*PageSnapshot, error) {
 		let idCounter = 1;
 		const interactiveTags = new Set(['a', 'button', 'input', 'textarea', 'select', 'details', 'summary']);
 
-		// Удаляем старые data-ai-id
 		document.querySelectorAll('[data-ai-id]').forEach(el => el.removeAttribute('data-ai-id'));
 
 		function cleanText(text) {
@@ -30,7 +33,6 @@ func (m *Manager) Snapshot() (*PageSnapshot, error) {
 		function isVisible(el) {
 			if (!el || !el.getBoundingClientRect) return false;
 
-			// Игнорируем aria-hidden (типичные клоны слайдов и т.п.)
 			const ariaHidden = el.getAttribute('aria-hidden');
 			if (ariaHidden === 'true') return false;
 
@@ -141,13 +143,11 @@ func (m *Manager) Snapshot() (*PageSnapshot, error) {
 					? cur.className.toLowerCase()
 					: '';
 
-				// Шапка / глобальная навигация
 				if (tag === 'header' || role === 'banner' ||
 					/\b(header|top-nav|navbar|site-header)\b/.test(className)) {
 					return 'header';
 				}
 
-				// Подвал
 				if (tag === 'footer' || role === 'contentinfo' ||
 					/\b(footer|site-footer)\b/.test(className)) {
 					return 'footer';
@@ -158,7 +158,6 @@ func (m *Manager) Snapshot() (*PageSnapshot, error) {
 			return 'main';
 		}
 
-		// ---------- поиск активной модалки ----------
 		function findActiveModal() {
 			const selectors = [
 				'[role="dialog"]',
@@ -195,7 +194,6 @@ func (m *Manager) Snapshot() (*PageSnapshot, error) {
 
 		let header = "";
 		if (activeModal) {
-			// Явный маркер, что мы в активной модалке
 			header = "=== ACTIVE DIALOG ===\n";
 		}
 
@@ -242,7 +240,6 @@ func (m *Manager) Snapshot() (*PageSnapshot, error) {
 						parts.push('context="dialog"');
 					}
 
-					// Регион: header / main / footer
 					const region = getRegion(el);
 					parts.push('region="' + escapeAttr(region) + '"');
 
@@ -271,7 +268,6 @@ func (m *Manager) Snapshot() (*PageSnapshot, error) {
 
 					output += prefix + '[' + aiId + '] ' + parts.join(' ') + '>\n';
 				} else {
-					// Показываем заголовки (в т.ч. заголовок модалки)
 					if (['h1','h2','h3','h4','h5'].includes(tag)) {
 						const headingText = cleanText(el.innerText || el.textContent || '');
 						if (headingText) {
@@ -304,7 +300,6 @@ func (m *Manager) Snapshot() (*PageSnapshot, error) {
 		return nil, fmt.Errorf("expected string from js, got %T", result)
 	}
 
-	// DEBUG: ищем кнопку корзины в снапшоте
 	if strings.Contains(treeStr, "Sepete git") {
 		fmt.Println("DEBUG: cart button 'Sepete git' IS present in snapshot")
 	} else {
@@ -313,9 +308,20 @@ func (m *Manager) Snapshot() (*PageSnapshot, error) {
 
 	title, _ := m.Page.Title()
 
+	// Full-page screenshot → base64
+	var screenshotB64 string
+	if buf, errShot := m.Page.Screenshot(playwright.PageScreenshotOptions{
+		FullPage: playwright.Bool(true),
+	}); errShot == nil {
+		screenshotB64 = base64.StdEncoding.EncodeToString(buf)
+	} else {
+		fmt.Printf("Warning: failed to take screenshot: %v\n", errShot)
+	}
+
 	return &PageSnapshot{
-		URL:   m.Page.URL(),
-		Title: title,
-		Tree:  treeStr,
+		URL:              m.Page.URL(),
+		Title:            title,
+		Tree:             treeStr,
+		ScreenshotBase64: screenshotB64,
 	}, nil
 }

@@ -4,7 +4,7 @@ type ActionType string
 
 const (
 	ActionClick     ActionType = "click"
-	ActionNavigate  ActionType = "navigate"
+	ActionNavigate  ActionType = "navigate" // использовать не должны, но оставим для совместимости
 	ActionTypeInput ActionType = "type"
 	ActionFinish    ActionType = "finish"
 )
@@ -18,10 +18,11 @@ type Action struct {
 }
 
 type DecisionInput struct {
-	Task       string
-	DOMTree    string
-	CurrentURL string
-	History    string // short description of previous steps
+	Task             string
+	DOMTree          string
+	CurrentURL       string
+	History          string
+	ScreenshotBase64 string // base64 PNG без префикса data:
 }
 
 type DecisionOutput struct {

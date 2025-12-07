@@ -10,13 +10,12 @@ import (
 	"github.com/nbenliogludev/go-browser-ai-agent/internal/agent"
 	"github.com/nbenliogludev/go-browser-ai-agent/internal/browser"
 	"github.com/nbenliogludev/go-browser-ai-agent/internal/llm"
-	"github.com/nbenliogludev/go-browser-ai-agent/internal/planner"
 )
 
 func main() {
 	reader := bufio.NewReader(os.Stdin)
 
-	fmt.Println("Starting AI browser agent (orchestrator mode)...")
+	fmt.Println("Starting Vision AI browser agent...")
 
 	// 1) Начальный URL
 	fmt.Print("Введите стартовый URL (пусто = https://example.com): ")
@@ -35,7 +34,7 @@ func main() {
 		log.Fatal("Пустая задача — агенту нечего делать.")
 	}
 
-	// 🔴 Обогащаем задачу контекстом про стартовый URL
+	// Добавляем в задачу контекст про домен и стартовый путь
 	task := agent.BuildTaskWithEnvironment(rawTask, startURL)
 
 	// 3) Браузер
@@ -50,24 +49,17 @@ func main() {
 		log.Fatalf("Не удалось открыть стартовый URL %s: %v", startURL, err)
 	}
 
-	// 5) LLM client
+	// 5) LLM client (Vision)
 	llmClient, err := llm.NewOpenAIClient()
 	if err != nil {
 		log.Fatalf("Ошибка инициализации LLM клиента: %v", err)
 	}
 
-	// 6) Planner client
-	plannerClient, err := planner.NewOpenAIPlanner()
-	if err != nil {
-		log.Fatalf("Ошибка инициализации planner клиента: %v", err)
-	}
+	// 6) Простой Vision Agent (без planner’а и sub-agents)
+	visionAgent := agent.NewAgent(bm, llmClient)
 
-	// 7) Orchestrator (planner + navigator + interaction)
-	orch := agent.NewOrchestrator(bm, plannerClient, llmClient)
-
-	// 8) Запускаем оркестратор
-	const maxSteps = 30
-	if err := orch.Run(task, maxSteps); err != nil {
+	const maxSteps = 40
+	if err := visionAgent.Run(task, maxSteps); err != nil {
 		log.Printf("Агент завершил работу с ошибкой: %v", err)
 	}
 
