@@ -4,8 +4,8 @@ type ActionType string
 
 const (
 	ActionClick     ActionType = "click"
-	ActionNavigate  ActionType = "navigate" // использовать не должны, но оставим для совместимости
 	ActionTypeInput ActionType = "type"
+	ActionScroll    ActionType = "scroll_down" // Generic скролл
 	ActionFinish    ActionType = "finish"
 )
 
@@ -13,7 +13,6 @@ type Action struct {
 	Type     ActionType `json:"type"`
 	TargetID int        `json:"target_id,omitempty"`
 	Text     string     `json:"text,omitempty"`
-	URL      string     `json:"url,omitempty"`
 	Submit   bool       `json:"submit,omitempty"`
 }
 
@@ -22,7 +21,7 @@ type DecisionInput struct {
 	DOMTree          string
 	CurrentURL       string
 	History          string
-	ScreenshotBase64 string // base64 PNG без префикса data:
+	ScreenshotBase64 string
 }
 
 type DecisionOutput struct {
