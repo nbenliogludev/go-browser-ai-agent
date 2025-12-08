@@ -23,36 +23,39 @@ func NewOpenAIClient() (*OpenAIClient, error) {
 	return &OpenAIClient{client: openai.NewClient(apiKey)}, nil
 }
 
+// GENERIC PROMPT: Приоритет на атрибуты!
 const visionSystemPrompt = `
 You are a web-browsing agent.
 
 INPUT:
 1. User Task.
 2. Current URL.
-3. DOM Summary (Viewport). [ID] <tag label="...">
+3. DOM Summary. 
+   - Note elements with attributes: 'priority="high"', 'style="filled"', 'pos="sticky"'.
 4. Screenshot.
 
 YOUR GOAL:
 Select the NEXT BEST ACTION to move towards the goal.
 
-STRATEGIES:
-1. **Search:** Use search bars for specific items ("Pizza", "Sushi").
-2. **Scroll:** If you don't see the target, scroll down ("scroll_down").
-3. **Modals:** If a modal/popup is open, interact with it (close or select options inside).
-4. **IDs:** Always use the numeric [ID] from the DOM Summary.
+GENERIC STRATEGIES:
+1. **Target Priority:** If you see an element with 'priority="high"' (filled color, short text), IT IS LIKELY THE PRIMARY ACTION. Click it!
+2. **Modals:** If inside a modal (--- MODAL START ---), ignore header texts/descriptions. Look for the 'priority="high"' button at the bottom.
+3. **Search:** Use search inputs for specific items.
+4. **Scroll:** If you don't see the target, scroll down.
 
 RESPONSE FORMAT (STRICT JSON):
 {
-  "thought": "Reasoning here...",
+  "thought": "Reasoning...",
   "action": {
     "type": "click" | "type" | "scroll_down" | "finish",
-    "target_id": 123,      // Required for click/type (integer)
-    "text": "search term"  // Required for type
+    "target_id": 123,
+    "text": "..."
   }
 }
 `
 
 func (c *OpenAIClient) DecideAction(input DecisionInput) (*DecisionOutput, error) {
+	// ... (код функции остается тем же) ...
 	ctx := context.Background()
 
 	var sb strings.Builder
@@ -64,7 +67,6 @@ func (c *OpenAIClient) DecideAction(input DecisionInput) (*DecisionOutput, error
 	sb.WriteString("DOM:\n" + input.DOMTree)
 
 	parts := []openai.ChatMessagePart{{Type: openai.ChatMessagePartTypeText, Text: sb.String()}}
-
 	if input.ScreenshotBase64 != "" {
 		parts = append(parts, openai.ChatMessagePart{
 			Type:     openai.ChatMessagePartTypeImageURL,
@@ -72,7 +74,6 @@ func (c *OpenAIClient) DecideAction(input DecisionInput) (*DecisionOutput, error
 		})
 	}
 
-	// RETRY LOOP (3 попытки для 429 ошибки)
 	var resp openai.ChatCompletionResponse
 	var err error
 	for attempt := 0; attempt < 3; attempt++ {
@@ -89,8 +90,8 @@ func (c *OpenAIClient) DecideAction(input DecisionInput) (*DecisionOutput, error
 			break
 		}
 		if strings.Contains(err.Error(), "429") {
-			fmt.Printf("⚠️ Rate Limit. Waiting 10s... (%d/3)\n", attempt+1)
-			time.Sleep(10 * time.Second) // Ждем дольше
+			fmt.Printf("⚠️ Rate Limit. Waiting 5s... (%d/3)\n", attempt+1)
+			time.Sleep(5 * time.Second)
 			continue
 		}
 		return nil, err
@@ -103,18 +104,16 @@ func (c *OpenAIClient) DecideAction(input DecisionInput) (*DecisionOutput, error
 	}
 
 	content := resp.Choices[0].Message.Content
-	// fmt.Println("DEBUG RAW:", content) // Раскомментируй, если JSON снова сломается
 
 	var out DecisionOutput
 	if err := json.Unmarshal([]byte(content), &out); err != nil {
 		return nil, fmt.Errorf("JSON error: %w", err)
 	}
 
-	// Fallback для неизвестных действий
 	switch out.Action.Type {
 	case ActionClick, ActionTypeInput:
 		if out.Action.TargetID == 0 {
-			out.Action.Type = ActionScroll // Если ID нет, лучше проскроллить
+			out.Action.Type = ActionScroll
 		}
 	case ActionScroll, ActionFinish:
 	default:
