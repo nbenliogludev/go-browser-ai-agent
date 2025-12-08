@@ -18,5 +18,7 @@ vendor/
 .playwright-user-data/
 .playwright_data/
 
+debug/
+
 # Logs
 *.log
