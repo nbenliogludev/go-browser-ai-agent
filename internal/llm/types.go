@@ -5,7 +5,7 @@ type ActionType string
 const (
 	ActionClick     ActionType = "click"
 	ActionTypeInput ActionType = "type"
-	ActionScroll    ActionType = "scroll_down" // Generic скролл
+	ActionScroll    ActionType = "scroll_down"
 	ActionFinish    ActionType = "finish"
 )
 
@@ -14,6 +14,10 @@ type Action struct {
 	TargetID int        `json:"target_id,omitempty"`
 	Text     string     `json:"text,omitempty"`
 	Submit   bool       `json:"submit,omitempty"`
+
+	// --- SECURITY FIELDS ---
+	IsDestructive     bool   `json:"is_destructive,omitempty"`     // Is this action dangerous?
+	DestructiveReason string `json:"destructive_reason,omitempty"` // Why? (e.g., "Deleting file")
 }
 
 type DecisionInput struct {
