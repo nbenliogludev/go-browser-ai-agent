@@ -33,24 +33,17 @@ func (m *Manager) Snapshot(step int) (*PageSnapshot, error) {
           return res;
        }
 
-       // --- FIX: VIEWPORT INTERSECTION ---
-       // Раньше мы требовали, чтобы элемент был ЦЕЛИКОМ в экране. Это отсекало большие контейнеры.
-       // Теперь проверяем ПЕРЕСЕЧЕНИЕ: если элемент хоть немного виден, мы его берем.
-       function isInViewport(el) {
-           const rect = el.getBoundingClientRect();
-           const windowHeight = window.innerHeight || document.documentElement.clientHeight;
-           const windowWidth = window.innerWidth || document.documentElement.clientWidth;
-
-           // Элемент виден, если:
-           // 1. Его низ ниже верхней границы экрана (rect.bottom > 0)
-           // 2. Его верх выше нижней границы экрана (rect.top < windowHeight)
-           // 3. Аналогично по горизонтали
-           return (
-               rect.bottom > 0 &&
-               rect.top < windowHeight &&
-               rect.right > 0 &&
-               rect.left < windowWidth
-           );
+       // Получаем "полезное" имя класса для контекста (footer, modal, wrapper...)
+       function getContextClass(el) {
+           if (!el.className || typeof el.className !== 'string') return '';
+           // Берем только первые 30 символов класса, чтобы не забивать токены
+           // и убираем мусорные классы типа 'sc-123456' (styled components)
+           let cls = el.className.split(' ')
+               .filter(c => !c.startsWith('sc-') && c.length > 3) // Фильтр мусора
+               .slice(0, 3) // Только первые 3 класса
+               .join('.');
+           
+           return cls ? '.' + cls : '';
        }
 
        function isVisible(el) {
@@ -61,16 +54,18 @@ func (m *Manager) Snapshot(step int) (*PageSnapshot, error) {
           return true; 
        }
 
-       function isNativeInteractive(el) {
-           const tag = el.tagName.toLowerCase();
-           return interactiveTags.has(tag) || el.getAttribute('role') === 'button';
+       // Viewport: 1.5 экрана
+       function isInViewport(el) {
+           const rect = el.getBoundingClientRect();
+           const windowHeight = window.innerHeight;
+           return rect.top < (windowHeight * 1.5) && rect.bottom > 0;
        }
 
        function isInteractive(el) {
           const tag = el.tagName.toLowerCase();
           if (tag === 'input' || tag === 'textarea' || tag === 'select') return true;
           
-          if (isNativeInteractive(el)) return true;
+          if (interactiveTags.has(tag) || el.getAttribute('role') === 'button') return true;
           
           if (el.onclick != null || window.getComputedStyle(el).cursor === 'pointer') return true;
           const className = (el.getAttribute('class') || '').toLowerCase();
@@ -79,42 +74,31 @@ func (m *Manager) Snapshot(step int) (*PageSnapshot, error) {
           return false;
        }
 
-       function hasInteractiveChild(el) {
-           let found = false;
-           function check(node, depth) {
-               if (depth > 2 || found) return; // Уменьшили глубину проверки для скорости
-               for (const child of node.children) {
-                   if (isNativeInteractive(child)) { 
-                       found = true; return; 
-                   }
-                   const style = window.getComputedStyle(child);
-                   if (style.cursor === 'pointer') {
-                       found = true; return;
-                   }
-                   check(child, depth + 1);
-               }
+       // Определяем важность элемента по стилю
+       function getImportanceAttributes(el) {
+           let attrs = "";
+           const style = window.getComputedStyle(el);
+           const bg = style.backgroundColor;
+           
+           // Яркие кнопки
+           if (bg && bg !== 'rgba(0, 0, 0, 0)' && bg !== 'transparent' && bg !== 'rgb(255, 255, 255)') {
+               attrs += ' style="filled"';
            }
-           check(el, 0);
-           return found;
+           // Прилипшие элементы (обычно футер с кнопкой купить)
+           if (style.position === 'fixed' || style.position === 'sticky') {
+               attrs += ' pos="sticky"';
+           }
+           return attrs;
        }
 
        function escapeAttr(value) { return value.replace(/"/g, '\\"'); }
 
        function getLabel(el) {
-          let text = cleanText(el.innerText || el.textContent);
+          // Собираем текст рекурсивно, но не глубоко, чтобы поймать "100 руб + Добавить"
+          let text = cleanText(el.innerText);
           if (el.tagName.toLowerCase() === 'input') {
              return cleanText(el.getAttribute('placeholder') || el.value);
           }
-          const aria = el.getAttribute('aria-label') || el.getAttribute('title');
-          if (aria) return cleanText(aria);
-          
-          // Для иконок (hh.ru их любит) пробуем найти SVG title или alt картинки
-          const svgTitle = el.querySelector('svg title');
-          if (svgTitle) return cleanText(svgTitle.textContent);
-          
-          const img = el.querySelector('img');
-          if (img && img.alt) return cleanText(img.alt);
-          
           return text;
        }
 
@@ -125,18 +109,14 @@ func (m *Manager) Snapshot(step int) (*PageSnapshot, error) {
              const el = node;
              const tag = el.tagName.toLowerCase();
              
-             // Убрали img из черного списка, так как иногда кнопка - это просто картинка
-             if (['script', 'style', 'noscript', 'meta', 'link'].includes(tag)) return '';
+             if (['script', 'style', 'svg', 'path', 'noscript', 'meta', 'link', 'img', 'figure', 'picture'].includes(tag)) return '';
              
              if (!isVisible(el)) return '';
              
-             // Проверка на модалку
              const isModal = (el.getAttribute('role') === 'dialog' || 
                               (el.getAttribute('class') || '').includes('modal') || 
-                              (el.getAttribute('class') || '').includes('popup') ||
-                              (el.getAttribute('data-qa') || '').includes('modal')); // hh.ru specific attribute support
-
-             // Если не модалка и не в зоне видимости - пропускаем
+                              (el.getAttribute('class') || '').includes('popup'));
+             
              if (!isModal && !isInViewport(el)) return ''; 
 
              let output = '';
@@ -144,49 +124,52 @@ func (m *Manager) Snapshot(step int) (*PageSnapshot, error) {
              
              if (isModal) output += prefix + '--- MODAL START ---\n';
 
-             let interactive = isInteractive(el);
+             const interactive = isInteractive(el);
              
-             // Если div кликабельный, но внутри есть явная кнопка/ссылка - считаем его оберткой
-             if (interactive && !isNativeInteractive(el) && hasInteractiveChild(el)) {
-                 interactive = false;
-             }
-
              if (interactive) {
                 const aiId = idCounter++;
                 el.setAttribute('data-ai-id', String(aiId));
                 
                 const parts = ['<' + tag];
+                
+                // Добавляем подсказки важности
+                parts.push(getImportanceAttributes(el));
+
                 const label = getLabel(el);
                 if (label) parts.push('label="' + escapeAttr(label) + '"');
                 if (tag === 'input') parts.push('type="' + (el.getAttribute('type') || 'text') + '"');
                 
-                // Добавляем data-qa атрибут, он очень полезен на hh.ru для контекста
-                const qa = el.getAttribute('data-qa');
-                if (qa) parts.push('qa="' + escapeAttr(qa) + '"');
-
                 output += prefix + '[' + aiId + '] ' + parts.join(' ') + '>\n';
-
-                if (isNativeInteractive(el)) {
-                    return output;
-                }
              } else {
-                 // Flattening: выводим текст только если он есть
+                 // --- RESTORED CONTEXT ---
+                 // Мы БОЛЬШЕ НЕ СПЛЮЩИВАЕМ (не скрываем) дивы.
+                 // Мы показываем их, если у них есть интересный класс или структура.
+                 // Чтобы сэкономить токены, мы выводим их упрощенно.
+                 
+                 const cls = getContextClass(el);
                  const directText = Array.from(el.childNodes).some(
                     child => child.nodeType === Node.TEXT_NODE && child.textContent.trim().length > 2
                  );
 
-                 if (isModal || directText || /^h[1-6]$/.test(tag)) {
-                     if (directText) {
-                         output += prefix + '<text> ' + cleanText(el.innerText) + '\n';
-                     } else if (/^h[1-6]$/.test(tag)) {
-                         output += prefix + '<' + tag + '> ' + cleanText(el.innerText) + '\n';
+                 // Выводим тег, если это заголовок, или если есть класс, или если есть текст
+                 if (isModal || directText || /^h[1-6]$/.test(tag) || cls) {
+                     let attrs = "";
+                     if (cls) attrs += ' class="' + cls + '"';
+                     if (directText) attrs += ' text="' + cleanText(el.childNodes[0].textContent) + '"';
+                     
+                     // Проверка на sticky контейнер (важно для кнопок внизу)
+                     const style = window.getComputedStyle(el);
+                     if (style.position === 'fixed' || style.position === 'sticky') {
+                        attrs += ' pos="sticky"';
                      }
+
+                     output += prefix + '<' + tag + attrs + '>\n';
                  }
              }
 
              for (const child of el.childNodes) {
-                const nextDepth = (interactive || isModal || output.trim().length > 0) ? depth + 1 : depth;
-                output += traverse(child, nextDepth);
+                // Всегда увеличиваем отступ, так как мы вернули структуру
+                output += traverse(child, depth + 1);
              }
              
              if (isModal) output += prefix + '--- MODAL END ---\n';
