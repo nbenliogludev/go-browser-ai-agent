@@ -64,13 +64,8 @@ func NewManager() (*Manager, error) {
 		}
 	}
 
-	// Попытка развернуть окно
 	if _, err := page.Evaluate(`window.moveTo(0, 0); window.resizeTo(screen.availWidth, screen.availHeight);`); err != nil {
 		fmt.Printf("Warning: failed to resize window via JS: %v\n", err)
-	}
-
-	if err := page.SetViewportSize(1640, 1080); err != nil {
-		fmt.Printf("Warning: failed to set viewport size: %v\n", err)
 	}
 
 	page.SetDefaultTimeout(60000)

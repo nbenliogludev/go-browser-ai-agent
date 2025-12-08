@@ -3,7 +3,7 @@ package browser
 import (
 	"encoding/base64"
 	"fmt"
-	"strings"
+	"os"
 
 	"github.com/playwright-community/playwright-go"
 )
@@ -15,246 +15,210 @@ type PageSnapshot struct {
 	ScreenshotBase64 string
 }
 
-func (m *Manager) Snapshot() (*PageSnapshot, error) {
+func (m *Manager) Snapshot(step int) (*PageSnapshot, error) {
 	if m == nil || m.Page == nil {
 		return nil, fmt.Errorf("page is not initialized")
 	}
 
-	// Скрипт для генерации DOM-дерева.
-	// ОПТИМИЗАЦИЯ: Игнорируем элементы вне viewport и слишком длинные тексты.
 	script := `() => {
        let idCounter = 1;
-       const interactiveTags = new Set(['a', 'button', 'input', 'textarea', 'select', 'details', 'summary']);
+       const interactiveTags = new Set(['a', 'button', 'input', 'textarea', 'select', 'label']);
 
-       // Очистка старых ID, если есть
        document.querySelectorAll('[data-ai-id]').forEach(el => el.removeAttribute('data-ai-id'));
 
        function cleanText(text) {
           if (!text) return '';
           let res = text.replace(/\s+/g, ' ').trim();
-          // Ограничиваем длину текста, чтобы не забивать контекст LLM
-          if (res.length > 100) {
-             return res.slice(0, 100) + '...';
-          }
+          if (res.length > 50) return res.slice(0, 50) + '...';
           return res;
        }
 
+       // --- FIX: VIEWPORT INTERSECTION ---
+       // Раньше мы требовали, чтобы элемент был ЦЕЛИКОМ в экране. Это отсекало большие контейнеры.
+       // Теперь проверяем ПЕРЕСЕЧЕНИЕ: если элемент хоть немного виден, мы его берем.
+       function isInViewport(el) {
+           const rect = el.getBoundingClientRect();
+           const windowHeight = window.innerHeight || document.documentElement.clientHeight;
+           const windowWidth = window.innerWidth || document.documentElement.clientWidth;
+
+           // Элемент виден, если:
+           // 1. Его низ ниже верхней границы экрана (rect.bottom > 0)
+           // 2. Его верх выше нижней границы экрана (rect.top < windowHeight)
+           // 3. Аналогично по горизонтали
+           return (
+               rect.bottom > 0 &&
+               rect.top < windowHeight &&
+               rect.right > 0 &&
+               rect.left < windowWidth
+           );
+       }
+
        function isVisible(el) {
-          if (!el || !el.getBoundingClientRect) return false;
-
-          const ariaHidden = el.getAttribute('aria-hidden');
-          if (ariaHidden === 'true') return false;
-
-          const rect = el.getBoundingClientRect();
           const style = window.getComputedStyle(el);
+          if (style.visibility === 'hidden' || style.display === 'none' || style.opacity === '0') return false;
+          const rect = el.getBoundingClientRect();
+          if (rect.width === 0 && rect.height === 0 && style.overflow === 'hidden') return false;
+          return true; 
+       }
 
-          // Проверка: находится ли элемент во вьюпорте.
-          // Если элемент далеко внизу, он не попадет в дерево, пока агент не проскроллит.
-          const inViewport = (
-             rect.top < window.innerHeight &&
-             rect.bottom > 0 &&
-             rect.left < window.innerWidth &&
-             rect.right > 0
-          );
-
-          return rect.width > 0 && rect.height > 0 &&
-             style.visibility !== 'hidden' &&
-             style.display !== 'none' &&
-             style.opacity !== '0' &&
-             inViewport;
+       function isNativeInteractive(el) {
+           const tag = el.tagName.toLowerCase();
+           return interactiveTags.has(tag) || el.getAttribute('role') === 'button';
        }
 
        function isInteractive(el) {
           const tag = el.tagName.toLowerCase();
-          const role = (el.getAttribute('role') || '').toLowerCase();
-          const tabIndex = el.getAttribute('tabindex');
+          if (tag === 'input' || tag === 'textarea' || tag === 'select') return true;
+          
+          if (isNativeInteractive(el)) return true;
+          
+          if (el.onclick != null || window.getComputedStyle(el).cursor === 'pointer') return true;
+          const className = (el.getAttribute('class') || '').toLowerCase();
+          if (className.includes('btn') || className.includes('button')) return true;
 
-          return interactiveTags.has(tag) ||
-             role === 'button' ||
-             role === 'link' ||
-             role === 'checkbox' ||
-             role === 'menuitem' ||
-             role === 'tab' ||
-             role === 'textbox' ||
-             role === 'combobox' ||
-             role === 'option' ||
-             (tabIndex !== null && tabIndex !== '-1') ||
-             el.onclick != null;
+          return false;
        }
 
-       function escapeAttr(value) {
-          return value.replace(/"/g, '\\"');
+       function hasInteractiveChild(el) {
+           let found = false;
+           function check(node, depth) {
+               if (depth > 2 || found) return; // Уменьшили глубину проверки для скорости
+               for (const child of node.children) {
+                   if (isNativeInteractive(child)) { 
+                       found = true; return; 
+                   }
+                   const style = window.getComputedStyle(child);
+                   if (style.cursor === 'pointer') {
+                       found = true; return;
+                   }
+                   check(child, depth + 1);
+               }
+           }
+           check(el, 0);
+           return found;
        }
 
-       // Упрощенная проверка контекста
-       function getContextFlags(el) {
-          let inDialog = false;
-          let cur = el;
-          while (cur && cur !== document.body) {
-             const role = (cur.getAttribute('role') || '').toLowerCase();
-             const ariaModal = cur.getAttribute('aria-modal');
-             if (role === 'dialog' || role === 'alertdialog' || ariaModal === 'true') {
-                inDialog = true;
-                break;
-             }
-             cur = cur.parentElement;
+       function escapeAttr(value) { return value.replace(/"/g, '\\"'); }
+
+       function getLabel(el) {
+          let text = cleanText(el.innerText || el.textContent);
+          if (el.tagName.toLowerCase() === 'input') {
+             return cleanText(el.getAttribute('placeholder') || el.value);
           }
-          return { inDialog };
+          const aria = el.getAttribute('aria-label') || el.getAttribute('title');
+          if (aria) return cleanText(aria);
+          
+          // Для иконок (hh.ru их любит) пробуем найти SVG title или alt картинки
+          const svgTitle = el.querySelector('svg title');
+          if (svgTitle) return cleanText(svgTitle.textContent);
+          
+          const img = el.querySelector('img');
+          if (img && img.alt) return cleanText(img.alt);
+          
+          return text;
        }
-
-       function getKind(el) {
-          const tag = el.tagName.toLowerCase();
-          const role = (el.getAttribute('role') || '').toLowerCase();
-          const type = (el.getAttribute('type') || '').toLowerCase();
-
-          if (tag === 'button' || role === 'button') return 'button';
-          if (tag === 'a' || role === 'link') return 'link';
-          if (tag === 'input') {
-             if (type === 'checkbox') return 'checkbox';
-             if (type === 'radio') return 'radio';
-             if (type === 'search') return 'search';
-             return 'input';
-          }
-          return '';
-       }
-
-       // Поиск активного модального окна, чтобы начать обход с него (если есть)
-       function findActiveModal() {
-          const selectors = ['[role="dialog"]', '[role="alertdialog"]', '[aria-modal="true"]', '.modal', '.overlay'];
-          const candidates = Array.from(document.querySelectorAll(selectors.join(',')));
-          let best = null;
-          let bestZ = -Infinity;
-          for (const el of candidates) {
-             if (!isVisible(el)) continue;
-             const style = window.getComputedStyle(el);
-             let z = parseInt(style.zIndex || '0', 10);
-             if (Number.isNaN(z)) z = 0;
-             if (z >= bestZ) {
-                bestZ = z;
-                best = el;
-             }
-          }
-          return best;
-       }
-
-       const activeModal = findActiveModal();
-       // Если есть модалка, фокусируемся на ней, иначе на body
-       const root = activeModal || document.body;
-       let header = activeModal ? "=== ACTIVE DIALOG ===\n" : "";
 
        function traverse(node, depth) {
-          if (!node) return '';
-          // Ограничение глубины рекурсии
-          if (depth > 20) return '';
-
-          if (node.nodeType === Node.TEXT_NODE) {
-             const text = cleanText(node.textContent);
-             // Игнорируем очень короткий шум
-             if (text.length > 2) {
-                return '  '.repeat(depth) + text + '\n';
-             }
-             return '';
-          }
+          if (!node || depth > 50) return ''; 
 
           if (node.nodeType === Node.ELEMENT_NODE) {
              const el = node;
+             const tag = el.tagName.toLowerCase();
+             
+             // Убрали img из черного списка, так как иногда кнопка - это просто картинка
+             if (['script', 'style', 'noscript', 'meta', 'link'].includes(tag)) return '';
+             
              if (!isVisible(el)) return '';
+             
+             // Проверка на модалку
+             const isModal = (el.getAttribute('role') === 'dialog' || 
+                              (el.getAttribute('class') || '').includes('modal') || 
+                              (el.getAttribute('class') || '').includes('popup') ||
+                              (el.getAttribute('data-qa') || '').includes('modal')); // hh.ru specific attribute support
+
+             // Если не модалка и не в зоне видимости - пропускаем
+             if (!isModal && !isInViewport(el)) return ''; 
 
              let output = '';
              const prefix = '  '.repeat(depth);
-             const tag = el.tagName.toLowerCase();
+             
+             if (isModal) output += prefix + '--- MODAL START ---\n';
 
-             // Пропускаем "мусорные" теги для экономии
-             if (['script', 'style', 'svg', 'path', 'noscript'].includes(tag)) return '';
+             let interactive = isInteractive(el);
+             
+             // Если div кликабельный, но внутри есть явная кнопка/ссылка - считаем его оберткой
+             if (interactive && !isNativeInteractive(el) && hasInteractiveChild(el)) {
+                 interactive = false;
+             }
 
-             if (isInteractive(el)) {
+             if (interactive) {
                 const aiId = idCounter++;
                 el.setAttribute('data-ai-id', String(aiId));
-
+                
                 const parts = ['<' + tag];
-                
-                // Собираем Label
-                let label = cleanText(el.innerText || el.textContent || '');
-                if (!label) label = cleanText(el.getAttribute('aria-label') || '');
-                if (!label) label = cleanText(el.getAttribute('title') || '');
-                if ((tag === 'input' || tag === 'textarea') && !label) {
-                   label = cleanText(el.getAttribute('placeholder') || '');
-                }
-
+                const label = getLabel(el);
                 if (label) parts.push('label="' + escapeAttr(label) + '"');
-
-                const kind = getKind(el);
-                if (kind) parts.push('kind="' + kind + '"');
-
-                const ctx = getContextFlags(el);
-                if (ctx.inDialog) parts.push('context="dialog"');
+                if (tag === 'input') parts.push('type="' + (el.getAttribute('type') || 'text') + '"');
                 
-                // Добавляем value для инпутов
-                if (tag === 'input' || tag === 'textarea') {
-                    const val = cleanText(el.value);
-                    if (val) parts.push('value="' + escapeAttr(val) + '"');
-                }
+                // Добавляем data-qa атрибут, он очень полезен на hh.ru для контекста
+                const qa = el.getAttribute('data-qa');
+                if (qa) parts.push('qa="' + escapeAttr(qa) + '"');
 
                 output += prefix + '[' + aiId + '] ' + parts.join(' ') + '>\n';
-             } else {
-                // Рендерим только структурные теги или если внутри есть текст
-                // Заголовки рендерим всегда с текстом
-                if (['h1','h2','h3','h4','h5'].includes(tag)) {
-                    const hText = cleanText(el.innerText);
-                    output += prefix + '<' + tag + '> ' + hText + '\n';
-                } else if (['div', 'p', 'span', 'section', 'li', 'ul', 'form'].includes(tag)) {
-                    // Просто контейнер, идем внутрь
-                    // Можно вывести тег, чтобы LLM понимала структуру, но без атрибутов
-                    // output += prefix + '<' + tag + '>\n'; 
-                    // (Для экономии токенов часто лучше опускать div, если он не интерактивный, 
-                    // но тогда теряется структура. Оставим вывод тега, если он важен)
-                    // В данной версии для макс. экономии НЕ выводим пустые div-ы в строку, 
-                    // просто рекурсивно идем внутрь.
+
+                if (isNativeInteractive(el)) {
+                    return output;
                 }
+             } else {
+                 // Flattening: выводим текст только если он есть
+                 const directText = Array.from(el.childNodes).some(
+                    child => child.nodeType === Node.TEXT_NODE && child.textContent.trim().length > 2
+                 );
+
+                 if (isModal || directText || /^h[1-6]$/.test(tag)) {
+                     if (directText) {
+                         output += prefix + '<text> ' + cleanText(el.innerText) + '\n';
+                     } else if (/^h[1-6]$/.test(tag)) {
+                         output += prefix + '<' + tag + '> ' + cleanText(el.innerText) + '\n';
+                     }
+                 }
              }
 
              for (const child of el.childNodes) {
-                output += traverse(child, depth+1);
+                const nextDepth = (interactive || isModal || output.trim().length > 0) ? depth + 1 : depth;
+                output += traverse(child, nextDepth);
              }
+             
+             if (isModal) output += prefix + '--- MODAL END ---\n';
 
              return output;
           }
           return '';
        }
 
-       return header + traverse(root, 0);
+       return traverse(document.body, 0);
     }`
 
 	result, err := m.Page.Evaluate(script)
 	if err != nil {
 		return nil, fmt.Errorf("js evaluation failed: %w", err)
 	}
-
-	treeStr, ok := result.(string)
-	if !ok {
-		return nil, fmt.Errorf("expected string from js, got %T", result)
-	}
-
-	// Проверяем наличие маркеров корзины для отладки
-	if strings.Contains(treeStr, "Sepete git") {
-		fmt.Println("DEBUG: cart button 'Sepete git' IS present in snapshot")
-	} else {
-		// fmt.Println("DEBUG: cart button 'Sepete git' NOT found in snapshot")
-	}
-
+	treeStr, _ := result.(string)
 	title, _ := m.Page.Title()
 
-	// Full-page скриншот отключен для экономии токенов и ускорения.
-	// Используем JPEG с качеством 70.
-	var screenshotB64 string
-	if buf, errShot := m.Page.Screenshot(playwright.PageScreenshotOptions{
+	screenshotParams := playwright.PageScreenshotOptions{
 		FullPage: playwright.Bool(false),
 		Type:     playwright.ScreenshotTypeJpeg,
 		Quality:  playwright.Int(70),
-	}); errShot == nil {
+	}
+
+	_ = os.Mkdir("debug", 0755)
+	filename := fmt.Sprintf("debug/step_%d.jpg", step)
+
+	var screenshotB64 string
+	if buf, errShot := m.Page.Screenshot(screenshotParams); errShot == nil {
 		screenshotB64 = base64.StdEncoding.EncodeToString(buf)
-	} else {
-		fmt.Printf("Warning: failed to take screenshot: %v\n", errShot)
+		_ = os.WriteFile(filename, buf, 0644)
 	}
 
 	return &PageSnapshot{
