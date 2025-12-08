@@ -23,7 +23,7 @@ func NewOpenAIClient() (*OpenAIClient, error) {
 	return &OpenAIClient{client: openai.NewClient(apiKey)}, nil
 }
 
-// GENERIC PROMPT: Обновлен для работы с модалками и визуальными стилями
+// GENERIC PROMPT: Visual Priority + SECURITY PROTOCOL
 const visionSystemPrompt = `
 You are a web-browsing agent.
 
@@ -31,56 +31,39 @@ INPUT:
 1. User Task.
 2. Current URL.
 3. DOM Summary. 
-   - Note elements with attributes: 'in_modal="true"', 'style="filled"', 'pos="sticky"'.
-   - Modal sections are wrapped as:
-       --- MODAL START ---
-       ...
-       --- MODAL END ---
+   - Note elements with attributes: 'priority="high"', 'style="filled"', 'pos="sticky"'.
 4. Screenshot.
 
 YOUR GOAL:
-Select the SINGLE NEXT BEST ACTION to move towards the goal.
+Select the NEXT BEST ACTION to move towards the goal.
 
 GENERIC STRATEGIES:
+1. **Target Priority:** If you see an element with 'priority="high"' (filled color, short text), IT IS LIKELY THE PRIMARY ACTION. Click it!
+2. **Modals:** If inside a modal (--- MODAL START ---), ignore header texts. Look for the 'priority="high"' button at the bottom.
+3. **Search:** Use search inputs for specific items.
+4. **Scroll:** If you don't see the target, scroll down.
 
-1. MODAL PRIORITY (CRITICAL)
-   - If you see a section marked with '--- MODAL START ---' or elements with 'in_modal="true"', you MUST FOCUS ONLY ON THE MODAL CONTENT.
-   - Ignore background elements while the modal is open.
-   - The primary action (e.g., "Add", "Confirm", "Sepete Ekle") is usually at the bottom of the modal and often has 'style="filled"' and/or 'pos="sticky"'.
-
-2. VISUAL CLUES
-   - 'style="filled"'  → primary, colored action button (buy, add, checkout).
-   - 'pos="sticky"'   → fixed header/footer, often contains important buttons like add-to-cart or checkout.
-
-3. CONTEXT
-   - Use labels and class hints like 'basket', 'footer', 'modal', etc. to understand purpose.
-   - When ordering or adding something to the cart, choose buttons whose visible text matches the goal (e.g., "Sepete Ekle", "Sepete git", "Satın al").
-
-4. SCROLL
-   - If you cannot see the required button (e.g., it is below the visible area), output type "scroll_down".
+SECURITY PROTOCOL (CRITICAL):
+You act as a Safety Filter. Before outputting an action, assess if it is "Destructive" or "Sensitive".
+- **Destructive/Sensitive Actions include:**
+  - Clicking "Pay", "Order", "Confirm Purchase", "Checkout".
+  - Deleting items, emails, or files.
+  - Sending messages or emails.
+  - Changing account settings (password, 2FA).
+  - Logging out.
+- If the action is sensitive, you MUST set "is_destructive": true and provide a "destructive_reason".
 
 RESPONSE FORMAT (STRICT JSON):
 {
-  "thought": "Short reasoning about what to do next",
+  "thought": "Reasoning...",
   "action": {
     "type": "click" | "type" | "scroll_down" | "finish",
     "target_id": 123,
-    "text": "..." 
+    "text": "...",
+    "is_destructive": true,              // Set to true if action is sensitive
+    "destructive_reason": "Sending money" // Required if is_destructive is true
   }
 }
-
-RULES FOR ACTION FIELDS:
-
-- For "click":
-  - "target_id" MUST come from the DOM summary like [320].
-  - "text" MUST be the main visible label/innerText of the element (e.g. "Sepete Ekle").
-- For "type":
-  - "target_id" MUST be the input element ID from the DOM summary.
-  - "text" MUST be the exact string to type.
-- For "scroll_down":
-  - "target_id" MUST be 0 or omitted, and "text" must be empty.
-- For "finish":
-  - Use only when the user task is clearly completed (e.g. pizza is already in the cart and the cart page is open).
 `
 
 func (c *OpenAIClient) DecideAction(input DecisionInput) (*DecisionOutput, error) {
@@ -95,18 +78,13 @@ func (c *OpenAIClient) DecideAction(input DecisionInput) (*DecisionOutput, error
 	sb.WriteString("DOM:\n" + input.DOMTree)
 
 	parts := []openai.ChatMessagePart{{Type: openai.ChatMessagePartTypeText, Text: sb.String()}}
-
-	// Добавляем скриншот, если он есть
 	if input.ScreenshotBase64 != "" {
 		parts = append(parts, openai.ChatMessagePart{
-			Type: openai.ChatMessagePartTypeImageURL,
-			ImageURL: &openai.ChatMessageImageURL{
-				URL: "data:image/jpeg;base64," + input.ScreenshotBase64,
-			},
+			Type:     openai.ChatMessagePartTypeImageURL,
+			ImageURL: &openai.ChatMessageImageURL{URL: "data:image/jpeg;base64," + input.ScreenshotBase64},
 		})
 	}
 
-	// RETRY LOOP (3 попытки для обработки Rate Limits 429)
 	var resp openai.ChatCompletionResponse
 	var err error
 	for attempt := 0; attempt < 3; attempt++ {
@@ -116,17 +94,12 @@ func (c *OpenAIClient) DecideAction(input DecisionInput) (*DecisionOutput, error
 				{Role: openai.ChatMessageRoleSystem, Content: visionSystemPrompt},
 				{Role: openai.ChatMessageRoleUser, MultiContent: parts},
 			},
-			ResponseFormat: &openai.ChatCompletionResponseFormat{
-				Type: openai.ChatCompletionResponseFormatTypeJSONObject,
-			},
-			Temperature: 0.1, // Низкая температура для предсказуемости JSON
+			ResponseFormat: &openai.ChatCompletionResponseFormat{Type: openai.ChatCompletionResponseFormatTypeJSONObject},
+			Temperature:    0.1,
 		})
-
 		if err == nil {
 			break
 		}
-
-		// Если ошибка лимитов, ждем и пробуем снова
 		if strings.Contains(err.Error(), "429") {
 			fmt.Printf("⚠️ Rate Limit. Waiting 5s... (%d/3)\n", attempt+1)
 			time.Sleep(5 * time.Second)
@@ -134,7 +107,6 @@ func (c *OpenAIClient) DecideAction(input DecisionInput) (*DecisionOutput, error
 		}
 		return nil, err
 	}
-
 	if err != nil {
 		return nil, err
 	}
@@ -146,10 +118,9 @@ func (c *OpenAIClient) DecideAction(input DecisionInput) (*DecisionOutput, error
 
 	var out DecisionOutput
 	if err := json.Unmarshal([]byte(content), &out); err != nil {
-		return nil, fmt.Errorf("JSON error: %w (content=%s)", err, content)
+		return nil, fmt.Errorf("JSON error: %w", err)
 	}
 
-	// Fallback: Если модель забыла указать действие, скроллим
 	switch out.Action.Type {
 	case ActionClick, ActionTypeInput:
 		if out.Action.TargetID == 0 {

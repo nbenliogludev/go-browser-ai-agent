@@ -34,12 +34,10 @@ func NewManager() (*Manager, error) {
 	userDataDir, _ := os.Getwd()
 	userDataDir = filepath.Join(userDataDir, ".playwright_data")
 
-	// Настройки для запуска в максимизированном режиме
 	context, err := pw.Chromium.LaunchPersistentContext(
 		userDataDir,
 		playwright.BrowserTypeLaunchPersistentContextOptions{
 			Headless: playwright.Bool(false),
-			// Viewport: nil отключает эмуляцию мобильного окна и дает браузеру управлять размером
 			Viewport: nil,
 			Args: []string{
 				"--start-maximized",
@@ -66,12 +64,9 @@ func NewManager() (*Manager, error) {
 		}
 	}
 
-	// JS-хак для гарантии разворота (опционально, но полезно)
 	if _, err := page.Evaluate(`window.moveTo(0, 0); window.resizeTo(screen.availWidth, screen.availHeight);`); err != nil {
 		fmt.Printf("Warning: failed to resize window via JS: %v\n", err)
 	}
-
-	// Убрали page.SetViewportSize(), так как он конфликтует с Viewport: nil
 
 	page.SetDefaultTimeout(60000)
 	page.SetDefaultNavigationTimeout(60000)
