@@ -23,7 +23,7 @@ func NewOpenAIClient() (*OpenAIClient, error) {
 	return &OpenAIClient{client: openai.NewClient(apiKey)}, nil
 }
 
-// GENERIC PROMPT: Приоритет на атрибуты!
+// GENERIC PROMPT: Visual Priority + SECURITY PROTOCOL
 const visionSystemPrompt = `
 You are a web-browsing agent.
 
@@ -39,9 +39,19 @@ Select the NEXT BEST ACTION to move towards the goal.
 
 GENERIC STRATEGIES:
 1. **Target Priority:** If you see an element with 'priority="high"' (filled color, short text), IT IS LIKELY THE PRIMARY ACTION. Click it!
-2. **Modals:** If inside a modal (--- MODAL START ---), ignore header texts/descriptions. Look for the 'priority="high"' button at the bottom.
+2. **Modals:** If inside a modal (--- MODAL START ---), ignore header texts. Look for the 'priority="high"' button at the bottom.
 3. **Search:** Use search inputs for specific items.
 4. **Scroll:** If you don't see the target, scroll down.
+
+SECURITY PROTOCOL (CRITICAL):
+You act as a Safety Filter. Before outputting an action, assess if it is "Destructive" or "Sensitive".
+- **Destructive/Sensitive Actions include:**
+  - Clicking "Pay", "Order", "Confirm Purchase", "Checkout".
+  - Deleting items, emails, or files.
+  - Sending messages or emails.
+  - Changing account settings (password, 2FA).
+  - Logging out.
+- If the action is sensitive, you MUST set "is_destructive": true and provide a "destructive_reason".
 
 RESPONSE FORMAT (STRICT JSON):
 {
@@ -49,13 +59,14 @@ RESPONSE FORMAT (STRICT JSON):
   "action": {
     "type": "click" | "type" | "scroll_down" | "finish",
     "target_id": 123,
-    "text": "..."
+    "text": "...",
+    "is_destructive": true,              // Set to true if action is sensitive
+    "destructive_reason": "Sending money" // Required if is_destructive is true
   }
 }
 `
 
 func (c *OpenAIClient) DecideAction(input DecisionInput) (*DecisionOutput, error) {
-	// ... (код функции остается тем же) ...
 	ctx := context.Background()
 
 	var sb strings.Builder
