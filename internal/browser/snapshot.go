@@ -20,179 +20,163 @@ func (m *Manager) Snapshot(step int) (*PageSnapshot, error) {
 		return nil, fmt.Errorf("page is not initialized")
 	}
 
+	// ИСПРАВЛЕННЫЙ JS (без вложенных backticks, чтобы IDE не ругалась)
+	// Добавлен режим ФОКУСИРОВКИ НА МОДАЛКЕ.
 	script := `() => {
-       let idCounter = 1;
-       const interactiveTags = new Set(['a', 'button', 'input', 'textarea', 'select', 'label']);
+		let idCounter = 1;
+		const MAX_ELEMENTS = 800; 
+		let output = [];
 
-       document.querySelectorAll('[data-ai-id]').forEach(el => el.removeAttribute('data-ai-id'));
+		document.querySelectorAll('[data-ai-id]').forEach(el => el.removeAttribute('data-ai-id'));
 
-       function cleanText(text) {
-          if (!text) return '';
-          let res = text.replace(/\s+/g, ' ').trim();
-          if (res.length > 50) return res.slice(0, 50) + '...';
-          return res;
-       }
+		// 1. ПРОВЕРКА НА МОДАЛКУ
+		// Ищем типичные классы модалок Getir и других сайтов
+		const modalSelectors = [
+			'[role="dialog"]', 
+			'.ReactModal__Content', 
+			'.modal-content', 
+			'[data-testid="modal"]',
+			'.style__ModalContent', // Getir specific
+			'.popup'
+		];
+		
+		let rootElement = document.body;
+		let isModalMode = false;
 
-       // Получаем "полезное" имя класса для контекста (footer, modal, wrapper...)
-       function getContextClass(el) {
-           if (!el.className || typeof el.className !== 'string') return '';
-           // Берем только первые 30 символов класса, чтобы не забивать токены
-           // и убираем мусорные классы типа 'sc-123456' (styled components)
-           let cls = el.className.split(' ')
-               .filter(c => !c.startsWith('sc-') && c.length > 3) // Фильтр мусора
-               .slice(0, 3) // Только первые 3 класса
-               .join('.');
-           
-           return cls ? '.' + cls : '';
-       }
+		for (const sel of modalSelectors) {
+			const modal = document.querySelector(sel);
+			if (modal && window.getComputedStyle(modal).display !== 'none') {
+				rootElement = modal;
+				isModalMode = true;
+				output.push("!!! MODAL OPEN DETECTED - FOCUSING ONLY ON POPUP !!!");
+				break;
+			}
+		}
 
-       function isVisible(el) {
-          const style = window.getComputedStyle(el);
-          if (style.visibility === 'hidden' || style.display === 'none' || style.opacity === '0') return false;
-          const rect = el.getBoundingClientRect();
-          if (rect.width === 0 && rect.height === 0 && style.overflow === 'hidden') return false;
-          return true; 
-       }
+		function cleanText(text) {
+			if (!text) return '';
+			return text.replace(/\s+/g, ' ').trim().slice(0, 60);
+		}
 
-       // Viewport: 1.5 экрана
-       function isInViewport(el) {
-           const rect = el.getBoundingClientRect();
-           const windowHeight = window.innerHeight;
-           return rect.top < (windowHeight * 1.5) && rect.bottom > 0;
-       }
+		function isVisible(el) {
+			const style = window.getComputedStyle(el);
+			if (style.visibility === 'hidden' || style.display === 'none' || style.opacity === '0') return false;
+			const rect = el.getBoundingClientRect();
+			return rect.width > 0 && rect.height > 0;
+		}
 
-       function isInteractive(el) {
-          const tag = el.tagName.toLowerCase();
-          if (tag === 'input' || tag === 'textarea' || tag === 'select') return true;
-          
-          if (interactiveTags.has(tag) || el.getAttribute('role') === 'button') return true;
-          
-          if (el.onclick != null || window.getComputedStyle(el).cursor === 'pointer') return true;
-          const className = (el.getAttribute('class') || '').toLowerCase();
-          if (className.includes('btn') || className.includes('button')) return true;
+		function isInteractive(el, style) {
+			const tag = el.tagName.toLowerCase();
+			if (['a', 'button', 'select', 'textarea', 'input'].includes(tag)) return true;
+			
+			const role = el.getAttribute('role');
+			if (role === 'button' || role === 'link' || role === 'checkbox') return true;
+			
+			if (style.cursor === 'pointer') return true;
+			if (el.onclick != null) return true;
+			
+			const cls = (el.getAttribute('class') || '').toLowerCase();
+			if (cls.includes('btn') || cls.includes('button') || cls.includes('add') || cls.includes('plus')) return true;
 
-          return false;
-       }
+			return false;
+		}
 
-       // Определяем важность элемента по стилю
-       function getImportanceAttributes(el) {
-           let attrs = "";
-           const style = window.getComputedStyle(el);
-           const bg = style.backgroundColor;
-           
-           // Яркие кнопки
-           if (bg && bg !== 'rgba(0, 0, 0, 0)' && bg !== 'transparent' && bg !== 'rgb(255, 255, 255)') {
-               attrs += ' style="filled"';
-           }
-           // Прилипшие элементы (обычно футер с кнопкой купить)
-           if (style.position === 'fixed' || style.position === 'sticky') {
-               attrs += ' pos="sticky"';
-           }
-           return attrs;
-       }
+		function traverse(node, depth) {
+			if (!node || output.length >= MAX_ELEMENTS) return;
+			if (node.nodeType !== Node.ELEMENT_NODE) return;
 
-       function escapeAttr(value) { return value.replace(/"/g, '\\"'); }
+			const el = node;
+			const tag = el.tagName.toLowerCase();
 
-       function getLabel(el) {
-          // Собираем текст рекурсивно, но не глубоко, чтобы поймать "100 руб + Добавить"
-          let text = cleanText(el.innerText);
-          if (el.tagName.toLowerCase() === 'input') {
-             return cleanText(el.getAttribute('placeholder') || el.value);
-          }
-          return text;
-       }
+			if (['script', 'style', 'noscript', 'meta', 'link', 'br', 'hr'].includes(tag)) return;
+			if (!isVisible(el)) return;
 
-       function traverse(node, depth) {
-          if (!node || depth > 50) return ''; 
+			const style = window.getComputedStyle(el);
+			const interactive = isInteractive(el, style);
+			
+			// Текст берем только прямой, чтобы избежать дублей
+			let ownText = '';
+			if (tag === 'input') {
+				ownText = el.value || el.getAttribute('placeholder') || '';
+			} else if (el.childNodes.length === 1 && el.childNodes[0].nodeType === Node.TEXT_NODE) {
+				ownText = el.textContent;
+			} else if (tag.match(/^h[1-6]$/)) {
+				ownText = el.textContent;
+			} else {
+				ownText = el.getAttribute('aria-label') || '';
+			}
+			ownText = cleanText(ownText);
 
-          if (node.nodeType === Node.ELEMENT_NODE) {
-             const el = node;
-             const tag = el.tagName.toLowerCase();
-             
-             if (['script', 'style', 'svg', 'path', 'noscript', 'meta', 'link', 'img', 'figure', 'picture'].includes(tag)) return '';
-             
-             if (!isVisible(el)) return '';
-             
-             const isModal = (el.getAttribute('role') === 'dialog' || 
-                              (el.getAttribute('class') || '').includes('modal') || 
-                              (el.getAttribute('class') || '').includes('popup'));
-             
-             if (!isModal && !isInViewport(el)) return ''; 
+			let line = '';
+			let shouldPrint = false;
 
-             let output = '';
-             const prefix = '  '.repeat(depth);
-             
-             if (isModal) output += prefix + '--- MODAL START ---\n';
+			if (interactive) {
+				shouldPrint = true;
+				// Логика иконок: показываем [ICON] только если это кнопка без текста
+				if (!ownText) {
+					const hasSvg = el.querySelector('svg') !== null;
+					const hasImg = el.querySelector('img') !== null;
+					// Если это просто div без svg/img и без текста - это не кнопка, а обертка. Пропускаем.
+					if (!hasSvg && !hasImg && tag === 'div' && !el.className.includes('btn')) {
+						shouldPrint = false;
+					} else {
+						ownText = '[ICON]';
+					}
+				}
 
-             const interactive = isInteractive(el);
-             
-             if (interactive) {
-                const aiId = idCounter++;
-                el.setAttribute('data-ai-id', String(aiId));
-                
-                const parts = ['<' + tag];
-                
-                // Добавляем подсказки важности
-                parts.push(getImportanceAttributes(el));
+				if (shouldPrint) {
+					const id = idCounter++;
+					el.setAttribute('data-ai-id', String(id));
+					
+					// Используем конкатенацию для безопасности Go-строк
+					line = '[' + id + '] <' + tag + '>';
+					if (ownText) line += ' "' + ownText.replace(/"/g, '') + '"';
+					
+					// Важно: если мы в режиме модалки, добавим пометку
+					if (isModalMode) line += ' [MODAL_CONTENT]';
+				}
+			} else {
+				// Неинтерактивный текст (цены, названия)
+				if (ownText.length > 2) {
+					shouldPrint = true;
+					line = ownText;
+					if (tag.match(/^h[1-6]$/)) line = '<' + tag + '> ' + line;
+				}
+			}
 
-                const label = getLabel(el);
-                if (label) parts.push('label="' + escapeAttr(label) + '"');
-                if (tag === 'input') parts.push('type="' + (el.getAttribute('type') || 'text') + '"');
-                
-                output += prefix + '[' + aiId + '] ' + parts.join(' ') + '>\n';
-             } else {
-                 // --- RESTORED CONTEXT ---
-                 // Мы БОЛЬШЕ НЕ СПЛЮЩИВАЕМ (не скрываем) дивы.
-                 // Мы показываем их, если у них есть интересный класс или структура.
-                 // Чтобы сэкономить токены, мы выводим их упрощенно.
-                 
-                 const cls = getContextClass(el);
-                 const directText = Array.from(el.childNodes).some(
-                    child => child.nodeType === Node.TEXT_NODE && child.textContent.trim().length > 2
-                 );
+			if (shouldPrint) {
+				const indent = ' '.repeat(depth); 
+				output.push(indent + line);
+			}
 
-                 // Выводим тег, если это заголовок, или если есть класс, или если есть текст
-                 if (isModal || directText || /^h[1-6]$/.test(tag) || cls) {
-                     let attrs = "";
-                     if (cls) attrs += ' class="' + cls + '"';
-                     if (directText) attrs += ' text="' + cleanText(el.childNodes[0].textContent) + '"';
-                     
-                     // Проверка на sticky контейнер (важно для кнопок внизу)
-                     const style = window.getComputedStyle(el);
-                     if (style.position === 'fixed' || style.position === 'sticky') {
-                        attrs += ' pos="sticky"';
-                     }
+			// Если мы в модалке, глубину можно сильно не ограничивать
+			// Если на главной - ограничиваем
+			const nextDepth = shouldPrint ? depth + 1 : depth;
+			
+			if (nextDepth < 15) {
+				const children = el.children;
+				for (let i = 0; i < children.length; i++) {
+					traverse(children[i], nextDepth);
+				}
+			}
+		}
 
-                     output += prefix + '<' + tag + attrs + '>\n';
-                 }
-             }
-
-             for (const child of el.childNodes) {
-                // Всегда увеличиваем отступ, так как мы вернули структуру
-                output += traverse(child, depth + 1);
-             }
-             
-             if (isModal) output += prefix + '--- MODAL END ---\n';
-
-             return output;
-          }
-          return '';
-       }
-
-       return traverse(document.body, 0);
-    }`
+		traverse(rootElement, 0);
+		return output.join('\n');
+	}`
 
 	result, err := m.Page.Evaluate(script)
 	if err != nil {
 		return nil, fmt.Errorf("js evaluation failed: %w", err)
 	}
 	treeStr, _ := result.(string)
+
 	title, _ := m.Page.Title()
 
 	screenshotParams := playwright.PageScreenshotOptions{
 		FullPage: playwright.Bool(false),
 		Type:     playwright.ScreenshotTypeJpeg,
-		Quality:  playwright.Int(70),
+		Quality:  playwright.Int(40),
 	}
 
 	_ = os.Mkdir("debug", 0755)

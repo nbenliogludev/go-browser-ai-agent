@@ -23,86 +23,96 @@ func NewOpenAIClient() (*OpenAIClient, error) {
 	return &OpenAIClient{client: openai.NewClient(apiKey)}, nil
 }
 
-// GENERIC PROMPT: Visual Priority + SECURITY PROTOCOL
 const visionSystemPrompt = `
-You are a web-browsing agent.
+You are a web agent.
 
-INPUT:
-1. User Task.
-2. Current URL.
-3. DOM Summary. 
-   - Note elements with attributes: 'priority="high"', 'style="filled"', 'pos="sticky"'.
-4. Screenshot.
+INPUT FORMAT:
+- [ID] <tag> "Text" : Interactive element. CLICK THESE.
+- "Text" : Non-interactive text.
+- !!! MODAL OPEN DETECTED !!! : Means a popup is open. You MUST interact with the popup (usually "Add" or "Close"). The rest of the page is hidden.
 
-YOUR GOAL:
-Select the NEXT BEST ACTION to move towards the goal.
+RULES:
+1. **MODAL PRIORITY**: If you see [MODAL_CONTENT], ignore everything else. Find the "Add" (Ekle) or "Confirm" button inside.
+2. **ICONS**: "[ICON]" usually means a button. If near a product, it's "Add to Cart".
+3. **NO ID 0**: Never use target_id: 0.
+4. **LOOP GUARD**: If you clicked a product and the modal opened, your NEXT step MUST be to click the button inside that modal.
 
-GENERIC STRATEGIES:
-1. **Target Priority:** If you see an element with 'priority="high"' (filled color, short text), IT IS LIKELY THE PRIMARY ACTION. Click it!
-2. **Modals:** If inside a modal (--- MODAL START ---), ignore header texts. Look for the 'priority="high"' button at the bottom.
-3. **Search:** Use search inputs for specific items.
-4. **Scroll:** If you don't see the target, scroll down.
-
-SECURITY PROTOCOL (CRITICAL):
-You act as a Safety Filter. Before outputting an action, assess if it is "Destructive" or "Sensitive".
-- **Destructive/Sensitive Actions include:**
-  - Clicking "Pay", "Order", "Confirm Purchase", "Checkout".
-  - Deleting items, emails, or files.
-  - Sending messages or emails.
-  - Changing account settings (password, 2FA).
-  - Logging out.
-- If the action is sensitive, you MUST set "is_destructive": true and provide a "destructive_reason".
-
-RESPONSE FORMAT (STRICT JSON):
+RESPONSE JSON:
 {
-  "thought": "Reasoning...",
+  "thought": "Plan.",
   "action": {
     "type": "click" | "type" | "scroll_down" | "finish",
     "target_id": 123,
-    "text": "...",
-    "is_destructive": true,              // Set to true if action is sensitive
-    "destructive_reason": "Sending money" // Required if is_destructive is true
+    "text": "input",
+    "submit": true,
+    "is_destructive": false
   }
 }
 `
+
+const safeDOMLimit = 10000
 
 func (c *OpenAIClient) DecideAction(input DecisionInput) (*DecisionOutput, error) {
 	ctx := context.Background()
 
 	var sb strings.Builder
-	sb.WriteString("TASK:\n" + input.Task + "\n\n")
-	sb.WriteString("URL: " + input.CurrentURL + "\n\n")
-	if input.History != "" {
-		sb.WriteString("HISTORY:\n" + input.History + "\n\n")
-	}
-	sb.WriteString("DOM:\n" + input.DOMTree)
+	sb.WriteString("TASK: " + input.Task + "\n")
+	sb.WriteString("URL: " + input.CurrentURL + "\n")
 
-	parts := []openai.ChatMessagePart{{Type: openai.ChatMessagePartTypeText, Text: sb.String()}}
+	histLines := strings.Split(input.History, "\n")
+	if len(histLines) > 3 {
+		sb.WriteString("LAST ACTIONS:\n" + strings.Join(histLines[len(histLines)-3:], "\n") + "\n")
+	} else {
+		sb.WriteString("HISTORY:\n" + input.History + "\n")
+	}
+
+	dom := input.DOMTree
+	if len(dom) > safeDOMLimit {
+		dom = dom[:safeDOMLimit] + "\n...[TRUNCATED]"
+	}
+	sb.WriteString("\nDOM:\n" + dom)
+
+	parts := []openai.ChatMessagePart{
+		{
+			Type: openai.ChatMessagePartTypeText,
+			Text: sb.String(),
+		},
+	}
+
 	if input.ScreenshotBase64 != "" {
 		parts = append(parts, openai.ChatMessagePart{
-			Type:     openai.ChatMessagePartTypeImageURL,
-			ImageURL: &openai.ChatMessageImageURL{URL: "data:image/jpeg;base64," + input.ScreenshotBase64},
+			Type: openai.ChatMessagePartTypeImageURL,
+			ImageURL: &openai.ChatMessageImageURL{
+				URL: "data:image/jpeg;base64," + input.ScreenshotBase64,
+			},
 		})
 	}
 
 	var resp openai.ChatCompletionResponse
 	var err error
-	for attempt := 0; attempt < 3; attempt++ {
+
+	for attempt := 0; attempt < 5; attempt++ {
 		resp, err = c.client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
 			Model: "gpt-4o",
 			Messages: []openai.ChatCompletionMessage{
 				{Role: openai.ChatMessageRoleSystem, Content: visionSystemPrompt},
 				{Role: openai.ChatMessageRoleUser, MultiContent: parts},
 			},
-			ResponseFormat: &openai.ChatCompletionResponseFormat{Type: openai.ChatCompletionResponseFormatTypeJSONObject},
-			Temperature:    0.1,
+			ResponseFormat: &openai.ChatCompletionResponseFormat{
+				Type: openai.ChatCompletionResponseFormatTypeJSONObject,
+			},
+			Temperature: 0.1,
+			MaxTokens:   250,
 		})
+
 		if err == nil {
 			break
 		}
+
 		if strings.Contains(err.Error(), "429") {
-			fmt.Printf("⚠️ Rate Limit. Waiting 5s... (%d/3)\n", attempt+1)
-			time.Sleep(5 * time.Second)
+			wait := time.Duration(3*(1<<attempt)) * time.Second
+			fmt.Printf("⚠️ Rate Limit (TPM). Pausing %v... (%d/5)\n", wait, attempt+1)
+			time.Sleep(wait)
 			continue
 		}
 		return nil, err
@@ -117,17 +127,14 @@ func (c *OpenAIClient) DecideAction(input DecisionInput) (*DecisionOutput, error
 	content := resp.Choices[0].Message.Content
 
 	var out DecisionOutput
-	if err := json.Unmarshal([]byte(content), &out); err != nil {
+	clean := strings.TrimPrefix(content, "```json")
+	clean = strings.TrimSuffix(clean, "```")
+
+	if err := json.Unmarshal([]byte(clean), &out); err != nil {
 		return nil, fmt.Errorf("JSON error: %w", err)
 	}
 
-	switch out.Action.Type {
-	case ActionClick, ActionTypeInput:
-		if out.Action.TargetID == 0 {
-			out.Action.Type = ActionScroll
-		}
-	case ActionScroll, ActionFinish:
-	default:
+	if out.Action.Type == "" {
 		out.Action.Type = ActionScroll
 	}
 

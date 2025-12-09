@@ -30,7 +30,6 @@ func NewManager() (*Manager, error) {
 		return nil, fmt.Errorf("start pw failed: %w", err)
 	}
 
-	// user-data-dir в текущей папке проекта
 	userDataDir, _ := os.Getwd()
 	userDataDir = filepath.Join(userDataDir, ".playwright_data")
 
