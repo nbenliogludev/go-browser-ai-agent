@@ -34,12 +34,11 @@ func (a *Agent) Run(task string, maxSteps int) error {
 
 		a.clearHighlights()
 
-		// Wait for network idle to ensure dynamic content (like search results) is loaded
 		if err := a.browser.Page.WaitForLoadState(playwright.PageWaitForLoadStateOptions{
 			State:   playwright.LoadStateNetworkidle,
 			Timeout: playwright.Float(4000),
 		}); err != nil {
-			log.Printf("WaitForLoadState(networkidle) timeout/failed: %v", err)
+			// Игнорируем таймаут ожидания, идем дальше
 		}
 
 		snapshot, err := a.browser.Snapshot(step)
@@ -47,11 +46,10 @@ func (a *Agent) Run(task string, maxSteps int) error {
 			return fmt.Errorf("snapshot failed: %w", err)
 		}
 
-		// Check for No-Op actions (stuck loop)
 		if prevSnapshot != nil && prevAction != nil {
 			if isNoOpTransition(prevSnapshot, snapshot) {
 				note := fmt.Sprintf(
-					"SYSTEM: Last action '%s' had NO VISIBLE EFFECT (DOM and URL unchanged). Mark it as FAILED. Try a different strategy (e.g., click a different button or scroll).",
+					"SYSTEM: Last action '%s' had NO VISIBLE EFFECT. Mark it as FAILED.",
 					formatAction(*prevAction),
 				)
 				mem.AddSystemNote(note)
@@ -60,21 +58,15 @@ func (a *Agent) Run(task string, maxSteps int) error {
 
 		fmt.Printf("URL: %s\nTitle: %s\n", snapshot.URL, snapshot.Title)
 
-		// Show preview of tree to console
 		preview := snapshot.Tree
 		if len(preview) > 800 {
 			preview = preview[:800] + "..."
 		}
-		fmt.Printf("Tree preview (top):\n%s\n", preview)
+		fmt.Printf("Tree preview:\n%s\n", preview)
 
-		// --- Prepare DOM for LLM ---
-		// We pass the full tree now (it's filtered inside Snapshot via region logic to be cleaner)
-		domTree := snapshot.Tree
-
-		// 3. LLM Decision
 		decision, err := a.llm.DecideAction(llm.DecisionInput{
 			Task:             task,
-			DOMTree:          domTree,
+			DOMTree:          snapshot.Tree,
 			CurrentURL:       snapshot.URL,
 			History:          mem.HistoryString(),
 			ScreenshotBase64: snapshot.ScreenshotBase64,
@@ -87,12 +79,10 @@ func (a *Agent) Run(task string, maxSteps int) error {
 		actionStr := formatAction(decision.Action)
 		fmt.Printf("⚡ ACTION: %s\n", actionStr)
 
-		// --- SECURITY CHECK ---
 		if decision.Action.IsDestructive {
 			fmt.Println("\n" + strings.Repeat("!", 50))
 			fmt.Printf("🛡️  SECURITY ALERT: Sensitive action detected!\n")
 			fmt.Printf("Reason: %s\n", decision.Action.DestructiveReason)
-			fmt.Printf("Action: %s\n", actionStr)
 
 			if decision.Action.TargetID > 0 {
 				selector := fmt.Sprintf("[data-ai-id='%d']", decision.Action.TargetID)
@@ -121,7 +111,6 @@ func (a *Agent) Run(task string, maxSteps int) error {
 			fmt.Println("✅ Action APPROVED.")
 		}
 
-		// --- LOOP GUARD ---
 		if blocked, reason := mem.ShouldBlock(snapshot.URL, decision.Action); blocked {
 			fmt.Printf("⛔ LOOP GUARD: %s\n", reason)
 			fmt.Println("🔄 Auto-fix: Scrolling down to break loop...")
@@ -136,7 +125,6 @@ func (a *Agent) Run(task string, maxSteps int) error {
 			return nil
 		}
 
-		// Execute
 		if err := a.executeAction(reader, decision.Action); err != nil {
 			log.Printf("Action failed: %v", err)
 		} else {
@@ -146,8 +134,8 @@ func (a *Agent) Run(task string, maxSteps int) error {
 			prevAction = &actionCopy
 		}
 
-		// Wait for UI to settle
-		time.Sleep(3 * time.Second)
+		// Пауза чуть больше, чтобы успели открыться поп-апы
+		time.Sleep(4 * time.Second)
 	}
 
 	return fmt.Errorf("max steps reached")
@@ -163,7 +151,6 @@ func (a *Agent) executeAction(reader *bufio.Reader, action llm.Action) error {
 
 	selector := fmt.Sprintf("[data-ai-id='%d']", action.TargetID)
 
-	// Highlight target
 	if action.Type == llm.ActionClick || action.Type == llm.ActionTypeInput {
 		a.highlight(selector)
 		time.Sleep(300 * time.Millisecond)
@@ -174,17 +161,13 @@ func (a *Agent) executeAction(reader *bufio.Reader, action llm.Action) error {
 	case llm.ActionClick:
 		fmt.Printf("Clicking %s...\n", selector)
 		locator := a.browser.Page.Locator(selector).First()
-
-		// Try to ensure element is visible
 		_ = locator.ScrollIntoViewIfNeeded()
 
-		// Playwright Click
 		err := locator.Click(playwright.LocatorClickOptions{
 			Force:   playwright.Bool(true),
 			Timeout: playwright.Float(3000),
 		})
 
-		// Fallback to JS click if Playwright fails (often happens with overlaid elements)
 		if err != nil {
 			fmt.Printf("⚠️ Click failed (%v). Trying JS Click fallback...\n", err)
 			_, jsErr := a.browser.Page.Evaluate(fmt.Sprintf(`
@@ -200,22 +183,17 @@ func (a *Agent) executeAction(reader *bufio.Reader, action llm.Action) error {
 		locator := a.browser.Page.Locator(selector).First()
 		_ = locator.ScrollIntoViewIfNeeded()
 
-		// 1. Clear existing text first (important for search bars)
 		if err := locator.Fill(""); err != nil {
 			return fmt.Errorf("failed to clear input: %w", err)
 		}
 
-		// 2. Type the new text
 		if err := locator.Fill(action.Text); err != nil {
 			return fmt.Errorf("failed to type text: %w", err)
 		}
 
-		// 3. Handle Autocomplete / Submit
 		if action.Submit {
-			// If submit is requested, press Enter
 			return a.browser.Page.Press(selector, "Enter")
 		} else {
-			// If not submitting (autocomplete), wait a bit for JS to trigger dropdowns
 			fmt.Println("⏳ Waiting 1s for autocomplete/dropdown...")
 			time.Sleep(1 * time.Second)
 		}
@@ -264,7 +242,6 @@ func isNoOpTransition(prev, cur *browser.PageSnapshot) bool {
 	if prev.URL != cur.URL {
 		return false
 	}
-	// Simple heuristic: if DOM length and content is extremely similar
 	if abs(len(prev.Tree)-len(cur.Tree)) < 50 && prev.Tree[:min(500, len(prev.Tree))] == cur.Tree[:min(500, len(cur.Tree))] {
 		return true
 	}
