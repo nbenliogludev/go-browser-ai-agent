@@ -15,9 +15,8 @@ type Action struct {
 	Text     string     `json:"text,omitempty"`
 	Submit   bool       `json:"submit,omitempty"`
 
-	// --- SECURITY FIELDS ---
-	IsDestructive     bool   `json:"is_destructive,omitempty"`     // Is this action dangerous?
-	DestructiveReason string `json:"destructive_reason,omitempty"` // Why? (e.g., "Deleting file")
+	IsDestructive     bool   `json:"is_destructive,omitempty"`
+	DestructiveReason string `json:"destructive_reason,omitempty"`
 }
 
 type DecisionInput struct {
@@ -29,9 +28,11 @@ type DecisionInput struct {
 }
 
 type DecisionOutput struct {
-	Thought  string `json:"thought"`
-	StepDone bool   `json:"step_done"`
-	Action   Action `json:"action"`
+	CurrentPhase string `json:"current_phase"` // NEW: SEARCH, EXECUTION, VERIFICATION
+	Observation  string `json:"observation"`   // NEW: What did I see change?
+	Thought      string `json:"thought"`
+	StepDone     bool   `json:"step_done"`
+	Action       Action `json:"action"`
 }
 
 type Client interface {

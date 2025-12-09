@@ -23,23 +23,51 @@ func NewOpenAIClient() (*OpenAIClient, error) {
 	return &OpenAIClient{client: openai.NewClient(apiKey)}, nil
 }
 
+// GENERIC STATE-AWARE PROMPT
 const visionSystemPrompt = `
-You are a web agent.
+You are an autonomous intelligent agent navigating a web browser.
 
-INPUT FORMAT:
-- [ID] <tag> "Text" : Interactive element. CLICK THESE.
-- "Text" : Non-interactive text.
-- !!! MODAL OPEN DETECTED !!! : Means a popup is open. You MUST interact with the popup (usually "Add" or "Close"). The rest of the page is hidden.
+GOAL: Complete the USER TASK efficiently.
 
-RULES:
-1. **MODAL PRIORITY**: If you see [MODAL_CONTENT], ignore everything else. Find the "Add" (Ekle) or "Confirm" button inside.
-2. **ICONS**: "[ICON]" usually means a button. If near a product, it's "Add to Cart".
-3. **NO ID 0**: Never use target_id: 0.
-4. **LOOP GUARD**: If you clicked a product and the modal opened, your NEXT step MUST be to click the button inside that modal.
+INPUT:
+1. DOM Tree: Current interactive elements.
+2. Screenshot: Visual context.
+3. HISTORY: Your previous actions and thoughts.
 
-RESPONSE JSON:
+CORE LOGIC - "STATE MACHINE":
+You must act like a State Machine. Before choosing an action, determine your current "Phase".
+
+**PHASE 1: SEARCH & DISCOVERY**
+- Goal: Find the specific item/content mentioned in the task.
+- Action: Search, Click Categories, Scroll.
+- Exit Condition: The item is visible on the screen.
+
+**PHASE 2: EXECUTION (INTERACTION)**
+- Goal: Interact with the item (Add to cart, Fill form, Click item).
+- Action: Click "Add", "Ekle", "Buy", or Select Options in Modal.
+- Exit Condition: You performed the action.
+
+**PHASE 3: VERIFICATION & PROGRESSION (CRITICAL)**
+- **Trigger:** You just performed an EXECUTION action (e.g., clicked "Add").
+- **Task:** LOOK for visual changes indicating success:
+  - Did a counter increase? (0 -> 1)
+  - Did a price appear/change? (0.00 -> 150.00)
+  - Did a "Added to cart" toast appear?
+  - Did the button text change to "In Cart"?
+- **Decision:**
+  - IF STATE CHANGED: **DO NOT REPEAT THE ACTION.** The item is added. Move to the NEXT logical step (Go to Cart, Checkout, Finish).
+  - IF NO CHANGE: The action failed. Try a different button or approach.
+
+**RULES:**
+1. **NO LOOPS:** If you just clicked "Add Pizza" and the DOM shows the price/cart updated, DO NOT click "Add Pizza" again. Proceed to Checkout.
+2. **MODALS:** If a modal opens, your entire universe is that modal. Finish the interaction inside it to close it or proceed.
+3. **ID 0:** Never use target_id: 0.
+
+RESPONSE JSON FORMAT:
 {
-  "thought": "Plan.",
+  "current_phase": "SEARCH" | "EXECUTION" | "VERIFICATION",
+  "observation": "I clicked 'Add' last step. I see the basket total is now 250 TL. The item is successfully added.",
+  "thought": "Since the item is added, I must now locate the Basket/Cart button to proceed to checkout.",
   "action": {
     "type": "click" | "type" | "scroll_down" | "finish",
     "target_id": 123,
@@ -59,11 +87,10 @@ func (c *OpenAIClient) DecideAction(input DecisionInput) (*DecisionOutput, error
 	sb.WriteString("TASK: " + input.Task + "\n")
 	sb.WriteString("URL: " + input.CurrentURL + "\n")
 
-	histLines := strings.Split(input.History, "\n")
-	if len(histLines) > 3 {
-		sb.WriteString("LAST ACTIONS:\n" + strings.Join(histLines[len(histLines)-3:], "\n") + "\n")
-	} else {
-		sb.WriteString("HISTORY:\n" + input.History + "\n")
+	// Передаем больше истории, чтобы модель видела свой прогресс
+	// Но только "Thought" и "Action", чтобы не забивать контекст
+	if input.History != "" {
+		sb.WriteString("HISTORY (Last 5 steps):\n" + input.History + "\n")
 	}
 
 	dom := input.DOMTree
@@ -101,8 +128,8 @@ func (c *OpenAIClient) DecideAction(input DecisionInput) (*DecisionOutput, error
 			ResponseFormat: &openai.ChatCompletionResponseFormat{
 				Type: openai.ChatCompletionResponseFormatTypeJSONObject,
 			},
-			Temperature: 0.1,
-			MaxTokens:   250,
+			Temperature: 0.0, // Строгий ноль для детерминизма
+			MaxTokens:   300,
 		})
 
 		if err == nil {
