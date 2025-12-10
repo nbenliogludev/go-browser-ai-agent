@@ -12,6 +12,7 @@ import (
 	"github.com/chromedp/cdproto/dom"
 	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
+
 	"github.com/nbenliogludev/go-browser-ai-agent/internal/browser"
 	"github.com/nbenliogludev/go-browser-ai-agent/internal/llm"
 )
@@ -29,19 +30,16 @@ func (a *Agent) Run(task string, maxSteps int) error {
 	mem := NewStepMemory(10, 3)
 	var prevSnapshot *browser.PageSnapshot
 
-	// Для security layer — читаем ответы пользователя из stdin
-	reader := bufio.NewReader(os.Stdin)
-
 	for step := 1; step <= maxSteps; step++ {
 		fmt.Printf("\n--- STEP %d ---\n", step)
 
-		// 1. Делаем снимок
+		// 1. Снимок страницы
 		snapshot, err := a.browser.Snapshot(step)
 		if err != nil {
 			return fmt.Errorf("snapshot failed: %w", err)
 		}
 
-		// Проверка на No-Op
+		// No-op detection
 		if prevSnapshot != nil && snapshot.Tree == prevSnapshot.Tree {
 			mem.AddSystemNote("SYSTEM ALERT: Last action had NO VISIBLE EFFECT.")
 		}
@@ -54,7 +52,7 @@ func (a *Agent) Run(task string, maxSteps int) error {
 		}
 		fmt.Printf("Tree preview:\n%s\n", preview)
 
-		// 2. Спрашиваем LLM
+		// 2. Решение модели
 		decision, err := a.llm.DecideAction(llm.DecisionInput{
 			Task:             task,
 			DOMTree:          snapshot.Tree,
@@ -66,72 +64,42 @@ func (a *Agent) Run(task string, maxSteps int) error {
 			return fmt.Errorf("llm error: %w", err)
 		}
 
-		// Логирование
+		// Логирование решения
+		decor := ""
+		if decision.Action.IsDestructive {
+			decor = " [DESTRUCTIVE]"
+		}
+
 		fmt.Println("\n" + strings.Repeat("-", 40))
 		fmt.Printf("🧠 PHASE:       %s\n", strings.ToUpper(decision.CurrentPhase))
 		fmt.Printf("👀 OBSERVATION: %s\n", decision.Observation)
 		fmt.Printf("🤖 THOUGHT:     %s\n", decision.Thought)
-
-		destructiveMark := ""
-		if decision.Action.IsDestructive {
-			destructiveMark = " [DESTRUCTIVE]"
-		}
 		fmt.Printf("⚡ ACTION:      %s [%d] %q%s\n",
 			decision.Action.Type,
 			decision.Action.TargetID,
 			decision.Action.Text,
-			destructiveMark,
+			decor,
 		)
 		fmt.Println(strings.Repeat("-", 40))
 
 		// Loop Guard
 		if blocked, reason := mem.ShouldBlock(snapshot.URL, decision.Action); blocked {
 			fmt.Printf("⛔ LOOP GUARD: %s\n", reason)
-			_ = chromedp.Run(a.browser.Ctx, chromedp.Evaluate(`window.scrollBy({top: 300, behavior: 'smooth'});`, nil))
+			_ = chromedp.Run(a.browser.Ctx,
+				chromedp.Evaluate(`window.scrollBy({top: 300, behavior: 'smooth'});`, nil),
+			)
 			mem.MarkLoopTriggered()
 			time.Sleep(2 * time.Second)
 			continue
 		}
 
+		// FINISH
 		if decision.Action.Type == llm.ActionFinish {
 			fmt.Println("✅ Task completed!")
 			return nil
 		}
 
-		// 2.5. SECURITY LAYER: подтверждение деструктивных действий
-		if decision.Action.IsDestructive {
-			fmt.Println("⚠️ SECURITY LAYER: модель предлагает ДЕСТРУКТИВНОЕ действие (оплата, удаление и т.п.).")
-			fmt.Printf("   Planned action: %s [%d] %q\n",
-				decision.Action.Type,
-				decision.Action.TargetID,
-				decision.Action.Text,
-			)
-			fmt.Print("   Разрешить это действие? (y/n): ")
-
-			answer, _ := reader.ReadString('\n')
-			answer = strings.TrimSpace(strings.ToLower(answer))
-
-			// Принимаем несколько вариантов «да», чтобы не промахнуться по раскладке:
-			// y / yes / да / д / e / evet → разрешить
-			allow := answer == "y" ||
-				answer == "yes" ||
-				answer == "да" ||
-				answer == "д" ||
-				answer == "e" ||
-				answer == "evet"
-
-			if !allow {
-				fmt.Println("🚫 Destructive action cancelled by user.")
-				mem.AddSystemNote("USER CANCELLED DESTRUCTIVE ACTION. Agent must choose a safer or alternative action.")
-				// Не выполняем действие, переходим к следующему шагу цикла.
-				time.Sleep(1 * time.Second)
-				continue
-			}
-
-			fmt.Println("✅ User approved destructive action, executing...")
-		}
-
-		// 3. Выполнение действия
+		// 3. Выполнение действия (с учётом security-layer)
 		if err := a.executeAction(decision.Action, snapshot); err != nil {
 			log.Printf("Action failed: %v", err)
 			mem.AddSystemNote(fmt.Sprintf("SYSTEM ERROR: %v", err))
@@ -148,7 +116,7 @@ func (a *Agent) Run(task string, maxSteps int) error {
 }
 
 func (a *Agent) executeAction(action llm.Action, snap *browser.PageSnapshot) error {
-	// Скролл — без target_id
+	// Скролл – отдельный путь
 	if action.Type == llm.ActionScroll {
 		fmt.Println("📜 Scrolling down...")
 		return chromedp.Run(
@@ -157,11 +125,20 @@ func (a *Agent) executeAction(action llm.Action, snap *browser.PageSnapshot) err
 		)
 	}
 
+	// Защита: без targetID для клика / ввода – ничего не делаем
 	if action.TargetID == 0 {
 		return nil
 	}
 
-	// 1. Находим BackendNodeID по нашему внутреннему ID
+	// SECURITY LAYER для деструктивных действий
+	if action.IsDestructive {
+		if !confirmDestructiveAction(action) {
+			// Пользователь запретил – считаем, что шага не было (ошибкой не считаем)
+			return nil
+		}
+	}
+
+	// 1. BackendNodeID по нашему внутреннему ID
 	backendNodeID, found := snap.Elements[action.TargetID]
 	if !found {
 		return fmt.Errorf("TargetID %d not found in elements map", action.TargetID)
@@ -171,7 +148,6 @@ func (a *Agent) executeAction(action llm.Action, snap *browser.PageSnapshot) err
 
 	// 2. Выполнение через CDP
 	return chromedp.Run(a.browser.Ctx, chromedp.ActionFunc(func(ctx context.Context) error {
-		// dom.ResolveNode().Do возвращает *runtime.RemoteObject
 		obj, err := dom.ResolveNode().
 			WithBackendNodeID(backendNodeID).
 			Do(ctx)
@@ -195,6 +171,7 @@ func (a *Agent) executeAction(action llm.Action, snap *browser.PageSnapshot) err
 				Do(ctx)
 
 		case llm.ActionTypeInput:
+			// Для текста лучше бы экранировать, но для тестовых задач достаточно.
 			script := fmt.Sprintf(`function() { 
 				this.scrollIntoViewIfNeeded();
 				this.value = "";
@@ -214,10 +191,51 @@ func (a *Agent) executeAction(action llm.Action, snap *browser.PageSnapshot) err
 				_ = chromedp.SendKeys("", "\r").Do(ctx)
 			}
 		default:
-			// На всякий случай — ничего не делаем
+			// На всякий случай – если тип действия нам не знаком, ничего не делаем
 			return nil
 		}
 
 		return err
 	}))
+}
+
+// confirmDestructiveAction – security-слой для опасных действий (оплата, удаление и т.п.)
+func confirmDestructiveAction(action llm.Action) bool {
+	fmt.Printf("⚠️ SECURITY LAYER: модель предлагает ДЕСТРУКТИВНОЕ действие (оплата, удаление и т.п.).\n")
+	fmt.Printf("   Planned action: %s [%d] %q\n", action.Type, action.TargetID, action.Text)
+	fmt.Print("   Разрешить это действие? (y/n): ")
+
+	// Пытаемся читать прямо из терминала, а не из stdin теста
+	tty, err := os.Open("/dev/tty")
+	if err != nil {
+		// Нет TTY (например, CI) – безопасно отменяем
+		fmt.Println(" (no TTY, auto-cancel)")
+		fmt.Println("🚫 Destructive action cancelled (no interactive TTY).")
+		return false
+	}
+	defer tty.Close()
+
+	reader := bufio.NewReader(tty)
+
+	for {
+		input, err := reader.ReadString('\n')
+		if err != nil {
+			fmt.Println("\n🚫 Destructive action cancelled (read error).")
+			return false
+		}
+
+		answer := strings.ToLower(strings.TrimSpace(input))
+
+		if answer == "y" || answer == "yes" || answer == "д" {
+			fmt.Println("✅ Destructive action approved by user.")
+			return true
+		}
+
+		if answer == "n" || answer == "no" || answer == "н" || answer == "" {
+			fmt.Println("🚫 Destructive action cancelled by user.")
+			return false
+		}
+
+		fmt.Print("   Please answer 'y' or 'n': ")
+	}
 }
