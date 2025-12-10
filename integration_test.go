@@ -6,38 +6,40 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chromedp/chromedp"
+
 	"github.com/nbenliogludev/go-browser-ai-agent/internal/agent"
 	"github.com/nbenliogludev/go-browser-ai-agent/internal/browser"
 	"github.com/nbenliogludev/go-browser-ai-agent/internal/llm"
-	"github.com/playwright-community/playwright-go"
 )
 
 func TestGetirPizza(t *testing.T) {
 	targetURL := "https://getir.com/yemek/"
-	userTask := "Закажи пиццу маргарита не в качестве меню"
-	maxSteps := 15
+	userTask := "Закажи пиццу маргарита среднего размера"
+	maxSteps := 20
 
 	if os.Getenv("OPENAI_API_KEY") == "" {
-		t.Fatal("OPENAI_API_KEY is not set")
+		t.Skip("OPENAI_API_KEY is not set, skipping e2e test")
 	}
 
 	log.Println("🚀 STARTING AUTOMATED TEST...")
 
-	b, err := browser.NewManager()
-	if err != nil {
-		t.Fatalf("Failed to init browser: %v", err)
-	}
+	// NewManager больше не возвращает error
+	b := browser.NewManager()
 	defer b.Close()
 
+	// Навигация через chromedp-контекст из Manager
 	log.Printf("Navigating to %s...", targetURL)
-	if _, err := b.Page.Goto(targetURL, playwright.PageGotoOptions{
-		WaitUntil: playwright.WaitUntilStateDomcontentloaded,
-		Timeout:   playwright.Float(60000),
-	}); err != nil {
+	if err := chromedp.Run(
+		b.Ctx,
+		chromedp.Navigate(targetURL),
+		chromedp.WaitReady("body", chromedp.ByQuery),
+	); err != nil {
 		t.Fatalf("Failed to navigate: %v", err)
 	}
 	time.Sleep(3 * time.Second)
 
+	// LLM-клиент
 	l, err := llm.NewOpenAIClient()
 	if err != nil {
 		t.Fatalf("Failed to init LLM: %v", err)

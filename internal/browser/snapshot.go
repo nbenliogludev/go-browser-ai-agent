@@ -1,197 +1,263 @@
 package browser
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
-	"os"
+	"log"
+	"strings"
 
-	"github.com/playwright-community/playwright-go"
+	"github.com/chromedp/cdproto/cdp"
+	"github.com/chromedp/cdproto/page"
+	"github.com/chromedp/chromedp"
 )
+
+// ElementMap хранит BackendNodeID (внутренний ID Chrome) по нашему LLM-ID
+type ElementMap map[int]cdp.BackendNodeID
 
 type PageSnapshot struct {
 	URL              string
 	Title            string
 	Tree             string
 	ScreenshotBase64 string
+	Elements         ElementMap
 }
 
+// ------------------ AX TYPES (свои, не из cdproto/accessibility) ------------------
+
+type AXValue struct {
+	Value interface{} `json:"value,omitempty"`
+}
+
+type AXNode struct {
+	NodeID           string            `json:"nodeId"`
+	Role             *AXValue          `json:"role,omitempty"`
+	Name             *AXValue          `json:"name,omitempty"`
+	Value            *AXValue          `json:"value,omitempty"`
+	BackendDOMNodeID cdp.BackendNodeID `json:"backendDOMNodeId,omitempty"`
+	Ignored          bool              `json:"ignored,omitempty"`
+}
+
+type axTreeResult struct {
+	Nodes []AXNode `json:"nodes"`
+}
+
+// ------------------ SNAPSHOT ------------------
+
 func (m *Manager) Snapshot(step int) (*PageSnapshot, error) {
-	if m == nil || m.Page == nil {
-		return nil, fmt.Errorf("page is not initialized")
-	}
+	var (
+		axNodes []AXNode
+		axErr   error
 
-	// ИСПРАВЛЕННЫЙ JS (без вложенных backticks, чтобы IDE не ругалась)
-	// Добавлен режим ФОКУСИРОВКИ НА МОДАЛКЕ.
-	script := `() => {
-		let idCounter = 1;
-		const MAX_ELEMENTS = 800; 
-		let output = [];
+		buf        []byte
+		url, title string
+	)
 
-		document.querySelectorAll('[data-ai-id]').forEach(el => el.removeAttribute('data-ai-id'));
+	err := chromedp.Run(
+		m.Ctx,
+		chromedp.Location(&url),
+		chromedp.Title(&title),
 
-		// 1. ПРОВЕРКА НА МОДАЛКУ
-		// Ищем типичные классы модалок Getir и других сайтов
-		const modalSelectors = [
-			'[role="dialog"]', 
-			'.ReactModal__Content', 
-			'.modal-content', 
-			'[data-testid="modal"]',
-			'.style__ModalContent', // Getir specific
-			'.popup'
-		];
-		
-		let rootElement = document.body;
-		let isModalMode = false;
-
-		for (const sel of modalSelectors) {
-			const modal = document.querySelector(sel);
-			if (modal && window.getComputedStyle(modal).display !== 'none') {
-				rootElement = modal;
-				isModalMode = true;
-				output.push("!!! MODAL OPEN DETECTED - FOCUSING ONLY ON POPUP !!!");
-				break;
-			}
-		}
-
-		function cleanText(text) {
-			if (!text) return '';
-			return text.replace(/\s+/g, ' ').trim().slice(0, 60);
-		}
-
-		function isVisible(el) {
-			const style = window.getComputedStyle(el);
-			if (style.visibility === 'hidden' || style.display === 'none' || style.opacity === '0') return false;
-			const rect = el.getBoundingClientRect();
-			return rect.width > 0 && rect.height > 0;
-		}
-
-		function isInteractive(el, style) {
-			const tag = el.tagName.toLowerCase();
-			if (['a', 'button', 'select', 'textarea', 'input'].includes(tag)) return true;
-			
-			const role = el.getAttribute('role');
-			if (role === 'button' || role === 'link' || role === 'checkbox') return true;
-			
-			if (style.cursor === 'pointer') return true;
-			if (el.onclick != null) return true;
-			
-			const cls = (el.getAttribute('class') || '').toLowerCase();
-			if (cls.includes('btn') || cls.includes('button') || cls.includes('add') || cls.includes('plus')) return true;
-
-			return false;
-		}
-
-		function traverse(node, depth) {
-			if (!node || output.length >= MAX_ELEMENTS) return;
-			if (node.nodeType !== Node.ELEMENT_NODE) return;
-
-			const el = node;
-			const tag = el.tagName.toLowerCase();
-
-			if (['script', 'style', 'noscript', 'meta', 'link', 'br', 'hr'].includes(tag)) return;
-			if (!isVisible(el)) return;
-
-			const style = window.getComputedStyle(el);
-			const interactive = isInteractive(el, style);
-			
-			// Текст берем только прямой, чтобы избежать дублей
-			let ownText = '';
-			if (tag === 'input') {
-				ownText = el.value || el.getAttribute('placeholder') || '';
-			} else if (el.childNodes.length === 1 && el.childNodes[0].nodeType === Node.TEXT_NODE) {
-				ownText = el.textContent;
-			} else if (tag.match(/^h[1-6]$/)) {
-				ownText = el.textContent;
-			} else {
-				ownText = el.getAttribute('aria-label') || '';
-			}
-			ownText = cleanText(ownText);
-
-			let line = '';
-			let shouldPrint = false;
-
-			if (interactive) {
-				shouldPrint = true;
-				// Логика иконок: показываем [ICON] только если это кнопка без текста
-				if (!ownText) {
-					const hasSvg = el.querySelector('svg') !== null;
-					const hasImg = el.querySelector('img') !== null;
-					// Если это просто div без svg/img и без текста - это не кнопка, а обертка. Пропускаем.
-					if (!hasSvg && !hasImg && tag === 'div' && !el.className.includes('btn')) {
-						shouldPrint = false;
-					} else {
-						ownText = '[ICON]';
-					}
-				}
-
-				if (shouldPrint) {
-					const id = idCounter++;
-					el.setAttribute('data-ai-id', String(id));
-					
-					// Используем конкатенацию для безопасности Go-строк
-					line = '[' + id + '] <' + tag + '>';
-					if (ownText) line += ' "' + ownText.replace(/"/g, '') + '"';
-					
-					// Важно: если мы в режиме модалки, добавим пометку
-					if (isModalMode) line += ' [MODAL_CONTENT]';
-				}
-			} else {
-				// Неинтерактивный текст (цены, названия)
-				if (ownText.length > 2) {
-					shouldPrint = true;
-					line = ownText;
-					if (tag.match(/^h[1-6]$/)) line = '<' + tag + '> ' + line;
-				}
+		// Получаем AX-tree через сырой CDP Target (а не Browser!)
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			exec := chromedp.FromContext(ctx)
+			if exec.Target == nil {
+				axErr = fmt.Errorf("target executor is nil")
+				return nil
 			}
 
-			if (shouldPrint) {
-				const indent = ' '.repeat(depth); 
-				output.push(indent + line);
+			var out axTreeResult
+			params := map[string]any{
+				"interestingOnly": true, // как в Playwright: только "интересные" узлы
 			}
 
-			// Если мы в модалке, глубину можно сильно не ограничивать
-			// Если на главной - ограничиваем
-			const nextDepth = shouldPrint ? depth + 1 : depth;
-			
-			if (nextDepth < 15) {
-				const children = el.children;
-				for (let i = 0; i < children.length; i++) {
-					traverse(children[i], nextDepth);
-				}
+			if err := exec.Target.Execute(ctx, "Accessibility.getFullAXTree", params, &out); err != nil {
+				axErr = err
+				return nil
 			}
-		}
 
-		traverse(rootElement, 0);
-		return output.join('\n');
-	}`
+			axNodes = out.Nodes
+			return nil
+		}),
 
-	result, err := m.Page.Evaluate(script)
+		// Скриншот
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			var err error
+			buf, err = page.CaptureScreenshot().
+				WithFormat(page.CaptureScreenshotFormatJpeg).
+				WithQuality(50).
+				Do(ctx)
+			return err
+		}),
+	)
+
 	if err != nil {
-		return nil, fmt.Errorf("js evaluation failed: %w", err)
-	}
-	treeStr, _ := result.(string)
-
-	title, _ := m.Page.Title()
-
-	screenshotParams := playwright.PageScreenshotOptions{
-		FullPage: playwright.Bool(false),
-		Type:     playwright.ScreenshotTypeJpeg,
-		Quality:  playwright.Int(40),
+		return nil, fmt.Errorf("chromedp snapshot failed: %w", err)
 	}
 
-	_ = os.Mkdir("debug", 0755)
-	filename := fmt.Sprintf("debug/step_%d.jpg", step)
+	elements := make(ElementMap)
+	idCounter := 1
 
-	var screenshotB64 string
-	if buf, errShot := m.Page.Screenshot(screenshotParams); errShot == nil {
+	var treeStr string
+	if axErr == nil && len(axNodes) > 0 {
+		treeStr = serializeAXNodes(axNodes, &idCounter, elements)
+	} else {
+		// Если вдруг AX не доступен – хотя бы DOM fallback, чтобы агент не ослеп
+		if axErr != nil {
+			log.Printf("⚠️ Accessibility.getFullAXTree failed (%v), fallback to DOM", axErr)
+		}
+		treeStr = buildDOMFallback(m.Ctx, &idCounter, elements)
+	}
+
+	screenshotB64 := ""
+	if len(buf) > 0 {
 		screenshotB64 = base64.StdEncoding.EncodeToString(buf)
-		_ = os.WriteFile(filename, buf, 0644)
 	}
+
+	_ = step // чтобы не ругалась IDE, если не используешь
 
 	return &PageSnapshot{
-		URL:              m.Page.URL(),
+		URL:              url,
 		Title:            title,
 		Tree:             treeStr,
 		ScreenshotBase64: screenshotB64,
+		Elements:         elements,
 	}, nil
+}
+
+// ------------------ AX SERIALIZATION ------------------
+
+func serializeAXNodes(nodes []AXNode, idCounter *int, elements ElementMap) string {
+	if len(nodes) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+
+	for _, node := range nodes {
+		if shouldSkipAX(&node) {
+			continue
+		}
+
+		role := axValueString(node.Role)
+		name := axValueString(node.Name)
+
+		isInteractive := isInteractiveRole(role)
+
+		if isInteractive {
+			currentID := *idCounter
+			*idCounter++
+
+			if node.BackendDOMNodeID != 0 {
+				elements[currentID] = node.BackendDOMNodeID
+			}
+
+			sb.WriteString(fmt.Sprintf("[%d] ", currentID))
+		} else {
+			sb.WriteString("- ")
+		}
+
+		if role == "" {
+			role = "unknown"
+		}
+		sb.WriteString(fmt.Sprintf("[%s]", role))
+
+		if name != "" {
+			cleanName := strings.ReplaceAll(name, "\n", " ")
+			if len(cleanName) > 80 {
+				cleanName = cleanName[:77] + "..."
+			}
+			sb.WriteString(fmt.Sprintf(" %q", cleanName))
+		}
+
+		if node.Value != nil && node.Value.Value != nil {
+			valStr := axValueString(node.Value)
+			if valStr != "" {
+				sb.WriteString(fmt.Sprintf(" (Val: %s)", valStr))
+			}
+		}
+
+		sb.WriteString("\n")
+	}
+
+	return sb.String()
+}
+
+func axValueString(v *AXValue) string {
+	if v == nil || v.Value == nil {
+		return ""
+	}
+
+	switch vv := v.Value.(type) {
+	case string:
+		return vv
+	case float64:
+		return fmt.Sprintf("%.2f", vv)
+	case bool:
+		if vv {
+			return "true"
+		}
+		return "false"
+	default:
+		return fmt.Sprint(vv)
+	}
+}
+
+func shouldSkipAX(node *AXNode) bool {
+	role := axValueString(node.Role)
+	name := axValueString(node.Name)
+
+	if (role == "genericContainer" || role == "none" || role == "") && name == "" {
+		return true
+	}
+	if node.Ignored {
+		return true
+	}
+	return false
+}
+
+func isInteractiveRole(role string) bool {
+	switch role {
+	case "button", "link", "checkbox", "radioButton",
+		"searchBox", "textBox", "comboBox",
+		"menuItem", "slider", "switch":
+		return true
+	default:
+		return false
+	}
+}
+
+// ------------------ DOM FALLBACK НА ВСЯКИЙ СЛУЧАЙ ------------------
+
+func buildDOMFallback(ctx context.Context, idCounter *int, elements ElementMap) string {
+	var nodes []*cdp.Node
+
+	err := chromedp.Run(
+		ctx,
+		chromedp.Nodes(
+			`a, button, input, select, textarea, [role], [aria-label]`,
+			&nodes,
+			chromedp.ByQueryAll,
+		),
+	)
+	if err != nil {
+		log.Printf("⚠️ DOM fallback failed: %v", err)
+		return ""
+	}
+
+	var sb strings.Builder
+
+	for _, n := range nodes {
+		currentID := *idCounter
+		*idCounter++
+
+		if n.BackendNodeID != 0 {
+			elements[currentID] = n.BackendNodeID
+		}
+
+		tag := strings.ToLower(n.NodeName)
+		sb.WriteString(fmt.Sprintf("[%d] <%s>\n", currentID, tag))
+	}
+
+	return sb.String()
 }

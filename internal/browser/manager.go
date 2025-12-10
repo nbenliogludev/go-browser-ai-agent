@@ -1,87 +1,58 @@
 package browser
 
 import (
-	"fmt"
+	"context"
 	"os"
 	"path/filepath"
+	"time"
 
-	"github.com/playwright-community/playwright-go"
-)
-
-const (
-	LoadStateLoad             = "load"
-	LoadStateDomcontentloaded = "domcontentloaded"
-	LoadStateNetworkidle      = "networkidle"
+	"github.com/chromedp/chromedp"
 )
 
 type Manager struct {
-	pw      *playwright.Playwright
-	Context playwright.BrowserContext
-	Page    playwright.Page
+	Ctx    context.Context
+	Cancel context.CancelFunc
 }
 
-func NewManager() (*Manager, error) {
-	if err := playwright.Install(); err != nil {
-		return nil, fmt.Errorf("install pw failed: %w", err)
-	}
+// NewManager поднимает Chrome с постоянным профилем,
+// чтобы сохранялись cookies / логин и т.п.
+func NewManager() *Manager {
+	// Директория профиля для этого агента (одна и та же между запусками)
+	userDir := filepath.Join(os.TempDir(), "go-browser-ai-agent-profile")
 
-	pw, err := playwright.Run()
-	if err != nil {
-		return nil, fmt.Errorf("start pw failed: %w", err)
-	}
+	opts := append(
+		chromedp.DefaultExecAllocatorOptions[:],
+		// ВАЖНО: используем userDir, чтобы Chrome работал с постоянным профилем
+		chromedp.UserDataDir(userDir),
 
-	userDataDir, _ := os.Getwd()
-	userDataDir = filepath.Join(userDataDir, ".playwright_data")
-
-	context, err := pw.Chromium.LaunchPersistentContext(
-		userDataDir,
-		playwright.BrowserTypeLaunchPersistentContextOptions{
-			Headless: playwright.Bool(false),
-			Viewport: nil,
-			Args: []string{
-				"--start-maximized",
-				"--window-position=0,0",
-				"--disable-blink-features=AutomationControlled",
-			},
-		},
+		chromedp.Flag("headless", false), // видно окно
+		chromedp.Flag("disable-gpu", false),
+		chromedp.Flag("enable-automation", false),
+		chromedp.Flag("disable-extensions", false),
+		chromedp.WindowSize(1280, 800),
 	)
-	if err != nil {
-		_ = pw.Stop()
-		return nil, err
-	}
 
-	var page playwright.Page
-	pages := context.Pages()
-	if len(pages) > 0 {
-		page = pages[0]
-	} else {
-		page, err = context.NewPage()
-		if err != nil {
-			_ = context.Close()
-			_ = pw.Stop()
-			return nil, fmt.Errorf("failed to create page: %w", err)
-		}
-	}
+	allocCtx, _ := chromedp.NewExecAllocator(context.Background(), opts...)
+	ctx, cancel := chromedp.NewContext(allocCtx)
 
-	if _, err := page.Evaluate(`window.moveTo(0, 0); window.resizeTo(screen.availWidth, screen.availHeight);`); err != nil {
-		fmt.Printf("Warning: failed to resize window via JS: %v\n", err)
+	// Прогреваем браузер
+	if err := chromedp.Run(ctx); err != nil {
+		cancel()
+		panic(err)
 	}
-
-	page.SetDefaultTimeout(60000)
-	page.SetDefaultNavigationTimeout(60000)
 
 	return &Manager{
-		pw:      pw,
-		Context: context,
-		Page:    page,
-	}, nil
+		Ctx:    ctx,
+		Cancel: cancel,
+	}
 }
 
 func (m *Manager) Close() {
-	if m.Context != nil {
-		_ = m.Context.Close()
+	if m.Cancel != nil {
+		m.Cancel()
 	}
-	if m.pw != nil {
-		_ = m.pw.Stop()
-	}
+}
+
+func (m *Manager) WithTimeout(d time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(m.Ctx, d)
 }
