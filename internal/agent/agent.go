@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
+	"regexp"
 	"strings"
 	"time"
 
@@ -26,86 +28,99 @@ func NewAgent(b *browser.Manager, c llm.Client) *Agent {
 	return &Agent{browser: b, llm: c}
 }
 
-// ---------- Структуры и хелперы для финального отчёта ----------
-
-type stepReport struct {
-	Step          int
-	URL           string
-	Phase         string
-	Observation   string
-	Thought       string
-	ActionSummary string
-}
-
-func formatActionSummary(a llm.Action) string {
-	return fmt.Sprintf(
-		"%s target=%d text=%q destructive=%v",
-		string(a.Type),
-		a.TargetID,
-		a.Text,
-		a.IsDestructive,
-	)
-}
-
-func printReport(task string, steps []stepReport) {
-	if len(steps) == 0 {
-		return
-	}
-
-	fmt.Println("\n===== AGENT REPORT =====")
-	fmt.Printf("Task: %s\n", task)
-	fmt.Printf("Total steps: %d\n\n", len(steps))
-
-	for _, s := range steps {
-		fmt.Printf("Step %d:\n", s.Step)
-		fmt.Printf("  URL:    %s\n", s.URL)
-		if s.Phase != "" {
-			fmt.Printf("  Phase:  %s\n", s.Phase)
-		}
-		if s.Observation != "" {
-			fmt.Printf("  Obs:    %s\n", s.Observation)
-		}
-		if s.Thought != "" {
-			fmt.Printf("  Thought:%s\n", s.Thought)
-		}
-		fmt.Printf("  Action: %s\n\n", s.ActionSummary)
-	}
-	fmt.Println("===== END OF REPORT =====")
-}
-
-// ------------------------------ Run ------------------------------
-
 func (a *Agent) Run(task string, maxSteps int) error {
 	mem := NewStepMemory(10, 3)
 	var prevSnapshot *browser.PageSnapshot
+	var report []string
+	start := time.Now()
 
-	// Копим шаги для финального отчёта
-	var reportSteps []stepReport
+	var finalAction llm.Action
+	var finalURL string
 
+	cartItems := make(map[string]int)
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt)
+	defer signal.Stop(sigCh)
+
+	printReport := func(reason string) {
+		if len(report) == 0 {
+			return
+		}
+		fmt.Println("\n===== EXECUTION REPORT =====")
+		fmt.Printf("Task: %s\n", task)
+		fmt.Printf("Duration: %s\n", time.Since(start).Truncate(time.Millisecond))
+		if reason != "" {
+			fmt.Printf("Exit reason: %s\n", reason)
+		}
+
+		for _, line := range report {
+			fmt.Println(line)
+		}
+
+		fmt.Println("\n----- SUMMARY -----")
+		fmt.Printf("Задача: %s\n", task)
+		fmt.Printf("Всего шагов: %d\n", len(report))
+
+		if finalURL != "" {
+			fmt.Printf("Финальный URL: %s\n", finalURL)
+		}
+
+		if hr := humanizeReason(reason); hr != "" {
+			fmt.Printf("Причина завершения: %s\n", hr)
+		}
+
+		if len(cartItems) > 0 {
+			fmt.Println("Что сделано с корзиной:")
+			for name, count := range cartItems {
+				fmt.Printf("- Добавлено в корзину: %d × %s\n", count, name)
+			}
+		}
+
+		lowerURL := strings.ToLower(finalURL)
+		if strings.Contains(lowerURL, "/odeme") ||
+			strings.Contains(lowerURL, "payment") ||
+			strings.Contains(lowerURL, "checkout") {
+			fmt.Println("Статус оформления заказа: достигнута страница оплаты, оформление заказа не выполнено автоматически.")
+		}
+
+		if finalAction.Type != "" {
+			fmt.Printf("Последнее действие: %s [%d] %q\n",
+				finalAction.Type,
+				finalAction.TargetID,
+				finalAction.Text,
+			)
+		}
+
+		fmt.Println("===== END OF REPORT =====")
+	}
+
+	interrupted := false
+
+loop:
 	for step := 1; step <= maxSteps; step++ {
+		select {
+		case <-sigCh:
+			fmt.Println("\n⏹ Received Ctrl+C (SIGINT). Stopping agent loop gracefully...")
+			interrupted = true
+			break loop
+		default:
+		}
+
 		fmt.Printf("\n--- STEP %d ---\n", step)
 
-		// 1. Снимок страницы
 		snapshot, err := a.browser.Snapshot(step)
 		if err != nil {
-			printReport(task, reportSteps)
+			printReport("snapshot error")
 			return fmt.Errorf("snapshot failed: %w", err)
 		}
 
-		// No-op detection
 		if prevSnapshot != nil && snapshot.Tree == prevSnapshot.Tree {
 			mem.AddSystemNote("SYSTEM ALERT: Last action had NO VISIBLE EFFECT.")
 		}
 
 		fmt.Printf("URL: %s\nTitle: %s\n", snapshot.URL, snapshot.Title)
 
-		preview := snapshot.Tree
-		if len(preview) > 800 {
-			preview = preview[:800] + "..."
-		}
-		fmt.Printf("Tree preview:\n%s\n", preview)
-
-		// 2. Решение модели
 		decision, err := a.llm.DecideAction(llm.DecisionInput{
 			Task:             task,
 			DOMTree:          snapshot.Tree,
@@ -114,11 +129,15 @@ func (a *Agent) Run(task string, maxSteps int) error {
 			ScreenshotBase64: snapshot.ScreenshotBase64,
 		})
 		if err != nil {
-			printReport(task, reportSteps)
+			printReport("llm error")
 			return fmt.Errorf("llm error: %w", err)
 		}
 
-		// Логирование решения
+		finalAction = decision.Action
+		finalURL = snapshot.URL
+
+		extractCartItemsFromObservation(decision.Observation, snapshot.URL, cartItems)
+
 		decor := ""
 		if decision.Action.IsDestructive {
 			decor = " [DESTRUCTIVE]"
@@ -136,22 +155,21 @@ func (a *Agent) Run(task string, maxSteps int) error {
 		)
 		fmt.Println(strings.Repeat("-", 40))
 
-		// Базовое описание действия для отчёта
-		reportActionSummary := formatActionSummary(decision.Action)
+		reportLine := fmt.Sprintf(
+			"STEP %d | URL=%s | PHASE=%s | ACTION=%s[%d] %q%s | OBS=%s",
+			step,
+			snapshot.URL,
+			strings.ToUpper(decision.CurrentPhase),
+			decision.Action.Type,
+			decision.Action.TargetID,
+			decision.Action.Text,
+			decor,
+			decision.Observation,
+		)
+		report = append(report, reportLine)
 
-		// Loop Guard
 		if blocked, reason := mem.ShouldBlock(snapshot.URL, decision.Action); blocked {
 			fmt.Printf("⛔ LOOP GUARD: %s\n", reason)
-
-			reportSteps = append(reportSteps, stepReport{
-				Step:          step,
-				URL:           snapshot.URL,
-				Phase:         decision.CurrentPhase,
-				Observation:   decision.Observation,
-				Thought:       decision.Thought,
-				ActionSummary: reportActionSummary + " [BLOCKED BY LOOP GUARD]",
-			})
-
 			_ = chromedp.Run(a.browser.Ctx,
 				chromedp.Evaluate(`window.scrollBy({top: 300, behavior: 'smooth'});`, nil),
 			)
@@ -160,54 +178,36 @@ func (a *Agent) Run(task string, maxSteps int) error {
 			continue
 		}
 
-		// FINISH
 		if decision.Action.Type == llm.ActionFinish {
-			reportSteps = append(reportSteps, stepReport{
-				Step:          step,
-				URL:           snapshot.URL,
-				Phase:         decision.CurrentPhase,
-				Observation:   decision.Observation,
-				Thought:       decision.Thought,
-				ActionSummary: reportActionSummary + " [FINISH]",
-			})
-
-			printReport(task, reportSteps)
 			fmt.Println("✅ Task completed!")
+			printReport("task finished")
 			return nil
 		}
 
-		// 3. Выполнение действия (с учётом security-layer)
 		if err := a.executeAction(decision.Action, snapshot); err != nil {
 			log.Printf("Action failed: %v", err)
 			mem.AddSystemNote(fmt.Sprintf("SYSTEM ERROR: %v", err))
-			reportActionSummary = reportActionSummary + " [ERROR: " + err.Error() + "]"
 		} else {
 			mem.Add(step, snapshot.URL, decision.Action)
 			mem.AddSystemNote(fmt.Sprintf("STATE UPDATE: %s | %s", decision.CurrentPhase, decision.Observation))
 			prevSnapshot = snapshot
 		}
 
-		// Добавляем шаг в отчёт
-		reportSteps = append(reportSteps, stepReport{
-			Step:          step,
-			URL:           snapshot.URL,
-			Phase:         decision.CurrentPhase,
-			Observation:   decision.Observation,
-			Thought:       decision.Thought,
-			ActionSummary: reportActionSummary,
-		})
-
 		time.Sleep(3 * time.Second)
 	}
 
-	printReport(task, reportSteps)
+	if interrupted {
+		mem.AddSystemNote("SYSTEM: execution interrupted by user (Ctrl+C).")
+		report = append(report, "INTERRUPTED BY USER (Ctrl+C)")
+		printReport("interrupted by user (Ctrl+C)")
+		return fmt.Errorf("interrupted by user (Ctrl+C)")
+	}
+
+	printReport("max steps reached")
 	return fmt.Errorf("max steps reached")
 }
 
-// --------------------------- Actions ----------------------------
-
 func (a *Agent) executeAction(action llm.Action, snap *browser.PageSnapshot) error {
-	// Скролл – отдельный путь
 	if action.Type == llm.ActionScroll {
 		fmt.Println("📜 Scrolling down...")
 		return chromedp.Run(
@@ -216,20 +216,16 @@ func (a *Agent) executeAction(action llm.Action, snap *browser.PageSnapshot) err
 		)
 	}
 
-	// Защита: без targetID для клика / ввода – ничего не делаем
 	if action.TargetID == 0 {
 		return nil
 	}
 
-	// SECURITY LAYER для деструктивных действий
 	if action.IsDestructive {
 		if !confirmDestructiveAction(action) {
-			// Пользователь запретил – считаем, что шага не было (ошибкой не считаем)
 			return nil
 		}
 	}
 
-	// 1. BackendNodeID по нашему внутреннему ID
 	backendNodeID, found := snap.Elements[action.TargetID]
 	if !found {
 		return fmt.Errorf("TargetID %d not found in elements map", action.TargetID)
@@ -237,33 +233,106 @@ func (a *Agent) executeAction(action llm.Action, snap *browser.PageSnapshot) err
 
 	fmt.Printf("🎯 Targeting BackendNodeID: %d\n", backendNodeID)
 
-	// 2. Выполнение через CDP
 	return chromedp.Run(a.browser.Ctx, chromedp.ActionFunc(func(ctx context.Context) error {
-		obj, err := dom.ResolveNode().
-			WithBackendNodeID(backendNodeID).
-			Do(ctx)
-		if err != nil {
-			return fmt.Errorf("resolve node failed: %w", err)
-		}
-
-		if obj == nil || obj.ObjectID == "" {
-			return fmt.Errorf("object id is empty (node might be detached)")
-		}
-
-		remoteObjectID := obj.ObjectID
-
 		switch action.Type {
 		case llm.ActionClick:
-			_, _, err = runtime.CallFunctionOn(`function() { 
-				this.scrollIntoViewIfNeeded();
-				this.click(); 
-			}`).
-				WithObjectID(remoteObjectID).
+			obj, err := dom.ResolveNode().
+				WithBackendNodeID(backendNodeID).
 				Do(ctx)
+			if err != nil {
+				return fmt.Errorf("resolve node failed: %w", err)
+			}
+			if obj == nil || obj.ObjectID == "" {
+				return fmt.Errorf("object id is empty (node might be detached)")
+			}
+
+			script := `function() {
+				try {
+					if (this.scrollIntoViewIfNeeded) {
+						this.scrollIntoViewIfNeeded();
+					} else if (this.scrollIntoView) {
+						this.scrollIntoView({ block: "center", inline: "center" });
+					}
+
+					const isClickable = (el) => {
+						if (!el) return false;
+						const tag = (el.tagName || "").toLowerCase();
+						const role = (el.getAttribute && (el.getAttribute("role") || "").toLowerCase()) || "";
+
+						if (tag === "button" || tag === "a") return true;
+						if (tag === "input") {
+							const type = (el.type || "").toLowerCase();
+							if (type === "button" || type === "submit" || type === "radio" || type === "checkbox") return true;
+						}
+						if (tag === "label") return true;
+						if (role === "button" || role === "link" || role === "radio" || role === "checkbox") return true;
+						return false;
+					};
+
+					const clickRadioFromLabel = (label) => {
+						if (!label) return false;
+						const input = label.querySelector("input[type='radio'],input[type='checkbox']");
+						if (input) {
+							input.click();
+							return true;
+						}
+						return false;
+					};
+
+					let el = this;
+
+					if (el.closest) {
+						const directLabel = el.closest("label");
+						if (clickRadioFromLabel(directLabel)) {
+							return;
+						}
+					}
+
+					for (let i = 0; i < 5 && el; i++) {
+						if (isClickable(el)) {
+							if (el.tagName && el.tagName.toLowerCase() === "label") {
+								if (clickRadioFromLabel(el)) return;
+							}
+							el.click();
+							return;
+						}
+						if (el.closest) {
+							const parentLabel = el.closest("label");
+							if (clickRadioFromLabel(parentLabel)) {
+								return;
+							}
+						}
+						el = el.parentElement;
+					}
+
+					this.click();
+				} catch (e) {
+					console.log("click helper error", e);
+				}
+			}`
+
+			_, _, err = runtime.CallFunctionOn(script).
+				WithObjectID(obj.ObjectID).
+				Do(ctx)
+			return err
 
 		case llm.ActionTypeInput:
+			obj, err := dom.ResolveNode().
+				WithBackendNodeID(backendNodeID).
+				Do(ctx)
+			if err != nil {
+				return fmt.Errorf("resolve node failed: %w", err)
+			}
+			if obj == nil || obj.ObjectID == "" {
+				return fmt.Errorf("object id is empty (node might be detached)")
+			}
+
 			script := fmt.Sprintf(`function() { 
-				this.scrollIntoViewIfNeeded();
+				if (this.scrollIntoViewIfNeeded) {
+					this.scrollIntoViewIfNeeded();
+				} else if (this.scrollIntoView) {
+					this.scrollIntoView({ block: "center", inline: "center" });
+				}
 				this.value = "";
 				this.value = "%s";
 				this.dispatchEvent(new Event('input', { bubbles: true }));
@@ -271,37 +340,31 @@ func (a *Agent) executeAction(action llm.Action, snap *browser.PageSnapshot) err
 			}`, action.Text)
 
 			_, _, err = runtime.CallFunctionOn(script).
-				WithObjectID(remoteObjectID).
+				WithObjectID(obj.ObjectID).
 				Do(ctx)
-
-			if action.Submit && err == nil {
-				_ = dom.Focus().
-					WithBackendNodeID(backendNodeID).
-					Do(ctx)
-				_ = chromedp.SendKeys("", "\r").Do(ctx)
+			if err != nil {
+				return err
 			}
 
+			if action.Submit {
+				_ = dom.Focus().WithBackendNodeID(backendNodeID).Do(ctx)
+				_ = chromedp.SendKeys("", "\r").Do(ctx)
+			}
+			return nil
+
 		default:
-			// Если тип действия незнаком – просто ничего не делаем
 			return nil
 		}
-
-		return err
 	}))
 }
 
-// ---------------------- Security layer -------------------------
-
-// confirmDestructiveAction – security-слой для опасных действий (оплата, удаление и т.п.)
 func confirmDestructiveAction(action llm.Action) bool {
 	fmt.Printf("⚠️ SECURITY LAYER: модель предлагает ДЕСТРУКТИВНОЕ действие (оплата, удаление и т.п.).\n")
 	fmt.Printf("   Planned action: %s [%d] %q\n", action.Type, action.TargetID, action.Text)
 	fmt.Print("   Разрешить это действие? (y/n): ")
 
-	// Пытаемся читать прямо из терминала, а не из stdin теста
 	tty, err := os.Open("/dev/tty")
 	if err != nil {
-		// Нет TTY (например, CI) – безопасно отменяем
 		fmt.Println(" (no TTY, auto-cancel)")
 		fmt.Println("🚫 Destructive action cancelled (no interactive TTY).")
 		return false
@@ -330,5 +393,59 @@ func confirmDestructiveAction(action llm.Action) bool {
 		}
 
 		fmt.Print("   Please answer 'y' or 'n': ")
+	}
+}
+
+func humanizeReason(reason string) string {
+	switch reason {
+	case "task finished":
+		return "модель явно завершила задачу"
+	case "max steps reached":
+		return "достигнут лимит шагов"
+	case "interrupted by user (Ctrl+C)":
+		return "вы прервали исполнение (Ctrl+C)"
+	case "llm error":
+		return "ошибка LLM-клиента"
+	case "snapshot error":
+		return "ошибка при снятии состояния страницы"
+	default:
+		return reason
+	}
+}
+
+var cartItemRegexp = regexp.MustCompile(`(\d+)\s*[×x]\s*([^'"]+)`)
+
+func extractCartItemsFromObservation(obs, url string, acc map[string]int) {
+	if acc == nil {
+		return
+	}
+	lowObs := strings.ToLower(obs)
+	lowURL := strings.ToLower(url)
+
+	if !(strings.Contains(lowObs, "cart") ||
+		strings.Contains(lowObs, "sepet") ||
+		strings.Contains(lowURL, "/sepet")) {
+		return
+	}
+
+	matches := cartItemRegexp.FindAllStringSubmatch(obs, -1)
+	for _, m := range matches {
+		if len(m) < 3 {
+			continue
+		}
+		countStr := strings.TrimSpace(m[1])
+		name := strings.TrimSpace(m[2])
+
+		var count int
+		_, err := fmt.Sscanf(countStr, "%d", &count)
+		if err != nil || count <= 0 {
+			continue
+		}
+
+		if name == "" {
+			continue
+		}
+
+		acc[name] += count
 	}
 }
