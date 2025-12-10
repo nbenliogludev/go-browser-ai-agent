@@ -13,9 +13,9 @@ import (
 	"github.com/nbenliogludev/go-browser-ai-agent/internal/llm"
 )
 
-func TestGetirPizza(t *testing.T) {
+func TestGetir(t *testing.T) {
 	targetURL := "https://getir.com/yemek/"
-	userTask := "Закажи пиццу маргарита среднего размера"
+	userTask := "закажи 2 микс тост"
 	maxSteps := 20
 
 	if os.Getenv("OPENAI_API_KEY") == "" {
