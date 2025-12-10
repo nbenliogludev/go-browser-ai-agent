@@ -26,9 +26,61 @@ func NewAgent(b *browser.Manager, c llm.Client) *Agent {
 	return &Agent{browser: b, llm: c}
 }
 
+// ---------- Структуры и хелперы для финального отчёта ----------
+
+type stepReport struct {
+	Step          int
+	URL           string
+	Phase         string
+	Observation   string
+	Thought       string
+	ActionSummary string
+}
+
+func formatActionSummary(a llm.Action) string {
+	return fmt.Sprintf(
+		"%s target=%d text=%q destructive=%v",
+		string(a.Type),
+		a.TargetID,
+		a.Text,
+		a.IsDestructive,
+	)
+}
+
+func printReport(task string, steps []stepReport) {
+	if len(steps) == 0 {
+		return
+	}
+
+	fmt.Println("\n===== AGENT REPORT =====")
+	fmt.Printf("Task: %s\n", task)
+	fmt.Printf("Total steps: %d\n\n", len(steps))
+
+	for _, s := range steps {
+		fmt.Printf("Step %d:\n", s.Step)
+		fmt.Printf("  URL:    %s\n", s.URL)
+		if s.Phase != "" {
+			fmt.Printf("  Phase:  %s\n", s.Phase)
+		}
+		if s.Observation != "" {
+			fmt.Printf("  Obs:    %s\n", s.Observation)
+		}
+		if s.Thought != "" {
+			fmt.Printf("  Thought:%s\n", s.Thought)
+		}
+		fmt.Printf("  Action: %s\n\n", s.ActionSummary)
+	}
+	fmt.Println("===== END OF REPORT =====")
+}
+
+// ------------------------------ Run ------------------------------
+
 func (a *Agent) Run(task string, maxSteps int) error {
 	mem := NewStepMemory(10, 3)
 	var prevSnapshot *browser.PageSnapshot
+
+	// Копим шаги для финального отчёта
+	var reportSteps []stepReport
 
 	for step := 1; step <= maxSteps; step++ {
 		fmt.Printf("\n--- STEP %d ---\n", step)
@@ -36,6 +88,7 @@ func (a *Agent) Run(task string, maxSteps int) error {
 		// 1. Снимок страницы
 		snapshot, err := a.browser.Snapshot(step)
 		if err != nil {
+			printReport(task, reportSteps)
 			return fmt.Errorf("snapshot failed: %w", err)
 		}
 
@@ -61,6 +114,7 @@ func (a *Agent) Run(task string, maxSteps int) error {
 			ScreenshotBase64: snapshot.ScreenshotBase64,
 		})
 		if err != nil {
+			printReport(task, reportSteps)
 			return fmt.Errorf("llm error: %w", err)
 		}
 
@@ -82,9 +136,22 @@ func (a *Agent) Run(task string, maxSteps int) error {
 		)
 		fmt.Println(strings.Repeat("-", 40))
 
+		// Базовое описание действия для отчёта
+		reportActionSummary := formatActionSummary(decision.Action)
+
 		// Loop Guard
 		if blocked, reason := mem.ShouldBlock(snapshot.URL, decision.Action); blocked {
 			fmt.Printf("⛔ LOOP GUARD: %s\n", reason)
+
+			reportSteps = append(reportSteps, stepReport{
+				Step:          step,
+				URL:           snapshot.URL,
+				Phase:         decision.CurrentPhase,
+				Observation:   decision.Observation,
+				Thought:       decision.Thought,
+				ActionSummary: reportActionSummary + " [BLOCKED BY LOOP GUARD]",
+			})
+
 			_ = chromedp.Run(a.browser.Ctx,
 				chromedp.Evaluate(`window.scrollBy({top: 300, behavior: 'smooth'});`, nil),
 			)
@@ -95,6 +162,16 @@ func (a *Agent) Run(task string, maxSteps int) error {
 
 		// FINISH
 		if decision.Action.Type == llm.ActionFinish {
+			reportSteps = append(reportSteps, stepReport{
+				Step:          step,
+				URL:           snapshot.URL,
+				Phase:         decision.CurrentPhase,
+				Observation:   decision.Observation,
+				Thought:       decision.Thought,
+				ActionSummary: reportActionSummary + " [FINISH]",
+			})
+
+			printReport(task, reportSteps)
 			fmt.Println("✅ Task completed!")
 			return nil
 		}
@@ -103,17 +180,31 @@ func (a *Agent) Run(task string, maxSteps int) error {
 		if err := a.executeAction(decision.Action, snapshot); err != nil {
 			log.Printf("Action failed: %v", err)
 			mem.AddSystemNote(fmt.Sprintf("SYSTEM ERROR: %v", err))
+			reportActionSummary = reportActionSummary + " [ERROR: " + err.Error() + "]"
 		} else {
 			mem.Add(step, snapshot.URL, decision.Action)
 			mem.AddSystemNote(fmt.Sprintf("STATE UPDATE: %s | %s", decision.CurrentPhase, decision.Observation))
 			prevSnapshot = snapshot
 		}
 
+		// Добавляем шаг в отчёт
+		reportSteps = append(reportSteps, stepReport{
+			Step:          step,
+			URL:           snapshot.URL,
+			Phase:         decision.CurrentPhase,
+			Observation:   decision.Observation,
+			Thought:       decision.Thought,
+			ActionSummary: reportActionSummary,
+		})
+
 		time.Sleep(3 * time.Second)
 	}
 
+	printReport(task, reportSteps)
 	return fmt.Errorf("max steps reached")
 }
+
+// --------------------------- Actions ----------------------------
 
 func (a *Agent) executeAction(action llm.Action, snap *browser.PageSnapshot) error {
 	// Скролл – отдельный путь
@@ -171,7 +262,6 @@ func (a *Agent) executeAction(action llm.Action, snap *browser.PageSnapshot) err
 				Do(ctx)
 
 		case llm.ActionTypeInput:
-			// Для текста лучше бы экранировать, но для тестовых задач достаточно.
 			script := fmt.Sprintf(`function() { 
 				this.scrollIntoViewIfNeeded();
 				this.value = "";
@@ -190,14 +280,17 @@ func (a *Agent) executeAction(action llm.Action, snap *browser.PageSnapshot) err
 					Do(ctx)
 				_ = chromedp.SendKeys("", "\r").Do(ctx)
 			}
+
 		default:
-			// На всякий случай – если тип действия нам не знаком, ничего не делаем
+			// Если тип действия незнаком – просто ничего не делаем
 			return nil
 		}
 
 		return err
 	}))
 }
+
+// ---------------------- Security layer -------------------------
 
 // confirmDestructiveAction – security-слой для опасных действий (оплата, удаление и т.п.)
 func confirmDestructiveAction(action llm.Action) bool {

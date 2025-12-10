@@ -24,11 +24,9 @@ func TestGetirPizza(t *testing.T) {
 
 	log.Println("🚀 STARTING AUTOMATED TEST...")
 
-	// NewManager больше не возвращает error
 	b := browser.NewManager()
 	defer b.Close()
 
-	// Навигация через chromedp-контекст из Manager
 	log.Printf("Navigating to %s...", targetURL)
 	if err := chromedp.Run(
 		b.Ctx,
