@@ -241,16 +241,6 @@ Example output:
 ...
 ```
 
-
-## ⚠️ Current Limitations
-
-- Maximum 40 steps per task execution (configurable)
-- Subject to OpenAI Vision API rate limits
-- No persistent memory between separate runs
-- Complex multi-page workflows may need task decomposition
-- Session state cleared between executions
-
-
 ## 📝 License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
