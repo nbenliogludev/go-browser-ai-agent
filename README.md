@@ -39,7 +39,7 @@ This AI agent can perform complex web interactions by:
 
 - **Go**: Version 1.21 or higher
 - **OpenAI API Key**: With GPT-4 Vision access
-- **Playwright Browsers**: Automatically downloaded on first run
+- **Chrome/Chromium**: Browser will be automatically managed by chromedp
 
 ## 🔧 Installation
 
@@ -132,8 +132,7 @@ go-browser-ai-agent/
 ## 🛠️ Tech Stack
 
 - **Go**: Core programming language
-- **chromedp**: Chrome DevTools Protocol for browser control
-- **playwright-go**: Browser management and installation
+- **chromedp**: Chrome DevTools Protocol for browser control and automation
 - **OpenAI GPT-4 Vision**: Visual understanding and decision making
 - **Accessibility Tree (AX)**: Robust interactive element detection
 
@@ -151,12 +150,6 @@ viewport := [2]int{1280, 720}     // Browser window size
 
 ### Common Issues
 
-**"Failed to create SingletonLock" error:**
-```bash
-# Remove browser data directory and restart
-rm -rf .playwright_data
-```
-
 **OpenAI Vision API errors (400/401):**
 - Verify your API key has GPT-4 Vision access
 - Check API key is correctly exported: `echo $OPENAI_API_KEY`
@@ -168,10 +161,9 @@ rm -rf .playwright_data
 - Consider upgrading OpenAI API tier
 
 **Browser launch failures:**
-```bash
-# Reinstall Playwright browsers
-go run github.com/playwright-community/playwright-go/cmd/playwright@latest install
-```
+- Ensure Chrome/Chromium is installed on your system
+- chromedp will use the system Chrome installation
+- Check that Chrome is not already running with the same profile
 
 
 ## 📊 Output & Reporting
@@ -198,4 +190,3 @@ Example output:
 ## 📝 License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
