@@ -236,7 +236,7 @@ Example output:
 
 ⚠️ SECURITY LAYER: модель предлагает ДЕСТРУКТИВНОЕ действие (оплата, удаление и т.п.).
    Planned action: click [42] "Complete Purchase"
-   Разрешить это действие? (y/n): n
+   Allow this action? (y/n): n
 🚫 Destructive action cancelled by user.
 ...
 ```
