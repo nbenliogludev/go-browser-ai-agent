@@ -45,14 +45,14 @@ When the agent detects a destructive action, it:
 
 **Example:**
 ```
-⚠️ SECURITY LAYER: модель предлагает ДЕСТРУКТИВНОЕ действие (оплата, удаление и т.п.).
+⚠️ SECURITY LAYER: The model suggests a destructive action (payment, delete и т.п.).
    Planned action: click [42] "Complete Payment"
-   Разрешить это действие? (y/n): 
+   Allow this action? (y/n): 
 ```
 
 **Your options:**
-- Type `y` or `yes` (or `д` in Russian) → Action proceeds
-- Type `n` or `no` (or `н` in Russian) → Action cancelled, agent continues safely
+- Type `y` → Action proceeds
+- Type `n` → Action cancelled, agent continues safely
 - Press Enter → Defaults to NO (safe default)
 
 ### Why This Matters
