@@ -14,15 +14,13 @@ type Manager struct {
 	Cancel context.CancelFunc
 }
 
-// NewManager поднимает Chrome с постоянным профилем,
-// чтобы сохранялись cookies / логин и т.п.
 func NewManager() *Manager {
 	// Директория профиля для этого агента (одна и та же между запусками)
 	userDir := filepath.Join(os.TempDir(), "go-browser-ai-agent-profile")
 
 	opts := append(
 		chromedp.DefaultExecAllocatorOptions[:],
-		// ВАЖНО: используем userDir, чтобы Chrome работал с постоянным профилем
+
 		chromedp.UserDataDir(userDir),
 
 		chromedp.Flag("headless", false), // видно окно
@@ -35,7 +33,6 @@ func NewManager() *Manager {
 	allocCtx, _ := chromedp.NewExecAllocator(context.Background(), opts...)
 	ctx, cancel := chromedp.NewContext(allocCtx)
 
-	// Прогреваем браузер
 	if err := chromedp.Run(ctx); err != nil {
 		cancel()
 		panic(err)
