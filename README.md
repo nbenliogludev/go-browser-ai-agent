@@ -21,6 +21,50 @@ This AI agent can perform complex web interactions by:
 - **Loop Prevention**: Automatically detects and breaks out of repetitive action patterns
 - **Detailed Reporting**: Generates step-by-step execution summaries
 - **Real-time Debugging**: Provides verbose logging of AI thoughts and actions
+- **Safety Confirmation Layer**: Requires user approval before executing potentially destructive actions
+
+## 🛡️ Safety & Security Layer
+
+The agent includes an intelligent safety mechanism to protect users from unintended consequences:
+
+### Destructive Action Detection
+
+The AI automatically identifies and flags potentially dangerous actions such as:
+- **Payment confirmations** (completing purchases, processing transactions)
+- **Account deletions** (removing accounts, deleting data)
+- **Form submissions** (sending messages, posting content)
+- **Irreversible operations** (permanent changes, cancellations)
+
+### User Confirmation Required
+
+When the agent detects a destructive action, it:
+
+1. **Pauses execution** and displays a warning
+2. **Shows action details** - what it's about to do
+3. **Waits for user approval** - requires explicit confirmation
+
+**Example:**
+```
+⚠️ SECURITY LAYER: модель предлагает ДЕСТРУКТИВНОЕ действие (оплата, удаление и т.п.).
+   Planned action: click [42] "Complete Payment"
+   Разрешить это действие? (y/n): 
+```
+
+**Your options:**
+- Type `y` or `yes` (or `д` in Russian) → Action proceeds
+- Type `n` or `no` (or `н` in Russian) → Action cancelled, agent continues safely
+- Press Enter → Defaults to NO (safe default)
+
+### Why This Matters
+
+This safety layer ensures:
+- ✅ You stay in control of critical decisions
+- ✅ No accidental purchases or payments
+- ✅ No unintended data deletion or form submissions
+- ✅ Ability to review before committing
+- ✅ Peace of mind during automated workflows
+
+**Note:** The agent stops completely when it cannot get user input (non-interactive environments), preventing any destructive actions in automated pipelines.
 
 ## 🚀 How It Works
 
@@ -30,10 +74,11 @@ This AI agent can perform complex web interactions by:
    - Accessibility tree with interactive elements
    - Screenshot of the visible page area
 3. **AI Decision**: Snapshot sent to LLM which decides next action (click, type, scroll, finish)
-4. **Action Execution**: Agent performs action via Chrome DevTools Protocol
-5. **Loop Detection**: System prevents repetitive action sequences
-6. **Iteration**: Process repeats until task completion or max steps reached
-7. **Report Generation**: Summary of steps taken and final state
+4. **Safety Check**: If action is potentially destructive (payment, deletion, etc.), user confirmation is required
+5. **Action Execution**: Agent performs action via Chrome DevTools Protocol
+6. **Loop Detection**: System prevents repetitive action sequences
+7. **Iteration**: Process repeats until task completion or max steps reached
+8. **Report Generation**: Summary of steps taken and final state
 
 ## 📋 Prerequisites
 
@@ -170,6 +215,7 @@ viewport := [2]int{1280, 720}     // Browser window size
 
 The agent provides:
 - **Real-time logs**: AI thoughts and action decisions
+- **Safety warnings**: Clear indicators when destructive actions are detected
 - **Debug information**: Element selections, screenshots taken
 - **Step summary**: Numbered sequence of all actions
 - **Final report**: Task completion status and end state
@@ -183,8 +229,26 @@ Example output:
 --- STEP 2 ---
 🤖 THOUGHT: Search results are visible. I'll click the first product.
 ⚡ ACTION: click [id=12]
+
+--- STEP 3 ---
+🤖 THOUGHT: I found the "Complete Purchase" button.
+⚡ ACTION: click [id=42] "Complete Purchase" [DESTRUCTIVE]
+
+⚠️ SECURITY LAYER: модель предлагает ДЕСТРУКТИВНОЕ действие (оплата, удаление и т.п.).
+   Planned action: click [42] "Complete Purchase"
+   Разрешить это действие? (y/n): n
+🚫 Destructive action cancelled by user.
 ...
 ```
+
+
+## ⚠️ Current Limitations
+
+- Maximum 40 steps per task execution (configurable)
+- Subject to OpenAI Vision API rate limits
+- No persistent memory between separate runs
+- Complex multi-page workflows may need task decomposition
+- Session state cleared between executions
 
 
 ## 📝 License
