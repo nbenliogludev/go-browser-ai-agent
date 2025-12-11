@@ -17,21 +17,21 @@ import (
 func main() {
 	reader := bufio.NewReader(os.Stdin)
 
-	fmt.Println("Starting Rhythmi browser agent...")
+	fmt.Println("Starting browser agent...")
 
-	fmt.Print("Введите стартовый URL (пусто = https://example.com): ")
+	fmt.Print("Enter start URL (empty = https://example.com): ")
 	startURL, _ := reader.ReadString('\n')
 	startURL = strings.TrimSpace(startURL)
 	if startURL == "" {
 		startURL = "https://example.com"
 	}
 
-	fmt.Println("Опишите задачу для агента (например: 'Найди кнопку входа и нажми её'):")
+	fmt.Println("Describe the task for the agent (for example: 'Find the login button and click it'):")
 	fmt.Print("> ")
 	rawTask, _ := reader.ReadString('\n')
 	rawTask = strings.TrimSpace(rawTask)
 	if rawTask == "" {
-		log.Fatal("Пустая задача — агенту нечего делать.")
+		log.Fatal("Empty task — nothing for the agent to do.")
 	}
 
 	task := agent.BuildTaskWithEnvironment(rawTask, startURL)
@@ -40,21 +40,21 @@ func main() {
 	defer bm.Close()
 
 	if err := chromedp.Run(bm.Ctx, chromedp.Navigate(startURL)); err != nil {
-		log.Fatalf("Не удалось открыть стартовый URL %s: %v", startURL, err)
+		log.Fatalf("Failed to open start URL %s: %v", startURL, err)
 	}
 
 	llmClient, err := llm.NewOpenAIClient()
 	if err != nil {
-		log.Fatalf("Ошибка инициализации LLM клиента: %v", err)
+		log.Fatalf("Failed to initialize LLM client: %v", err)
 	}
 
 	rhythmi := agent.NewAgent(bm, llmClient)
 
 	const maxSteps = 40
 	if err := rhythmi.Run(task, maxSteps); err != nil {
-		log.Printf("Агент завершил работу с ошибкой: %v", err)
+		log.Printf("Agent finished with error: %v", err)
 	}
 
-	fmt.Println("\nНажмите Enter, чтобы закрыть браузер...")
+	fmt.Println("\nPress Enter to close the browser...")
 	_, _ = reader.ReadString('\n')
 }

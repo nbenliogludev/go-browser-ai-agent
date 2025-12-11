@@ -15,15 +15,12 @@ type Manager struct {
 }
 
 func NewManager() *Manager {
-	// Директория профиля для этого агента (одна и та же между запусками)
 	userDir := filepath.Join(os.TempDir(), "go-browser-ai-agent-profile")
 
 	opts := append(
 		chromedp.DefaultExecAllocatorOptions[:],
-
 		chromedp.UserDataDir(userDir),
-
-		chromedp.Flag("headless", false), // видно окно
+		chromedp.Flag("headless", false),
 		chromedp.Flag("disable-gpu", false),
 		chromedp.Flag("enable-automation", false),
 		chromedp.Flag("disable-extensions", false),

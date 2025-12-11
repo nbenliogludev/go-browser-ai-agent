@@ -23,7 +23,6 @@ func NewOpenAIClient() (*OpenAIClient, error) {
 	return &OpenAIClient{client: openai.NewClient(apiKey)}, nil
 }
 
-// GENERIC STATE-AWARE PROMPT
 const visionSystemPrompt = `
 You are an autonomous intelligent agent navigating a web browser.
 
@@ -139,7 +138,6 @@ RESPONSE JSON FORMAT:
 }
 `
 
-// Можно держать лимит чуть побольше для AX-дерева
 const safeDOMLimit = 20000
 
 func (c *OpenAIClient) DecideAction(input DecisionInput) (*DecisionOutput, error) {
@@ -149,7 +147,6 @@ func (c *OpenAIClient) DecideAction(input DecisionInput) (*DecisionOutput, error
 	sb.WriteString("TASK: " + input.Task + "\n")
 	sb.WriteString("URL: " + input.CurrentURL + "\n")
 
-	// История: чтобы модель видела свои прошлые действия/ошибки
 	if input.History != "" {
 		sb.WriteString("HISTORY (Last 5 steps):\n" + input.History + "\n")
 	}
@@ -216,14 +213,13 @@ func (c *OpenAIClient) DecideAction(input DecisionInput) (*DecisionOutput, error
 
 	var out DecisionOutput
 	clean := strings.TrimPrefix(content, "```json")
-	clean = strings.TrimPrefix(clean, "```") // на случай просто ``` без json
+	clean = strings.TrimPrefix(clean, "```")
 	clean = strings.TrimSuffix(clean, "```")
 
 	if err := json.Unmarshal([]byte(clean), &out); err != nil {
 		return nil, fmt.Errorf("JSON error: %w; raw content: %s", err, content)
 	}
 
-	// НОРМАЛИЗАЦИЯ action.type — фикс багов вида "search" и прочей фигни
 	rawType := strings.ToLower(strings.TrimSpace(string(out.Action.Type)))
 
 	switch rawType {
