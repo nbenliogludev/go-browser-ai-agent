@@ -28,8 +28,8 @@ type DecisionInput struct {
 }
 
 type DecisionOutput struct {
-	CurrentPhase string `json:"current_phase"` // NEW: SEARCH, EXECUTION, VERIFICATION
-	Observation  string `json:"observation"`   // NEW: What did I see change?
+	CurrentPhase string `json:"current_phase"`
+	Observation  string `json:"observation"`
 	Thought      string `json:"thought"`
 	StepDone     bool   `json:"step_done"`
 	Action       Action `json:"action"`

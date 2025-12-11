@@ -59,21 +59,21 @@ func (a *Agent) Run(task string, maxSteps int) error {
 		}
 
 		fmt.Println("\n----- SUMMARY -----")
-		fmt.Printf("Задача: %s\n", task)
-		fmt.Printf("Всего шагов: %d\n", len(report))
+		fmt.Printf("Task: %s\n", task)
+		fmt.Printf("Total steps: %d\n", len(report))
 
 		if finalURL != "" {
-			fmt.Printf("Финальный URL: %s\n", finalURL)
+			fmt.Printf("Final URL: %s\n", finalURL)
 		}
 
 		if hr := humanizeReason(reason); hr != "" {
-			fmt.Printf("Причина завершения: %s\n", hr)
+			fmt.Printf("Human-readable reason: %s\n", hr)
 		}
 
 		if len(cartItems) > 0 {
-			fmt.Println("Что сделано с корзиной:")
+			fmt.Println("Cart actions:")
 			for name, count := range cartItems {
-				fmt.Printf("- Добавлено в корзину: %d × %s\n", count, name)
+				fmt.Printf("- Added to cart: %d × %s\n", count, name)
 			}
 		}
 
@@ -81,11 +81,11 @@ func (a *Agent) Run(task string, maxSteps int) error {
 		if strings.Contains(lowerURL, "/odeme") ||
 			strings.Contains(lowerURL, "payment") ||
 			strings.Contains(lowerURL, "checkout") {
-			fmt.Println("Статус оформления заказа: достигнута страница оплаты, оформление заказа не выполнено автоматически.")
+			fmt.Println("Checkout status: payment page reached, order was not submitted automatically.")
 		}
 
 		if finalAction.Type != "" {
-			fmt.Printf("Последнее действие: %s [%d] %q\n",
+			fmt.Printf("Last action: %s [%d] %q\n",
 				finalAction.Type,
 				finalAction.TargetID,
 				finalAction.Text,
@@ -359,9 +359,9 @@ func (a *Agent) executeAction(action llm.Action, snap *browser.PageSnapshot) err
 }
 
 func confirmDestructiveAction(action llm.Action) bool {
-	fmt.Printf("⚠️ SECURITY LAYER: модель предлагает ДЕСТРУКТИВНОЕ действие (оплата, удаление и т.п.).\n")
+	fmt.Printf("⚠️ SECURITY LAYER: model suggests a DESTRUCTIVE action (payment, deletion, etc.).\n")
 	fmt.Printf("   Planned action: %s [%d] %q\n", action.Type, action.TargetID, action.Text)
-	fmt.Print("   Разрешить это действие? (y/n): ")
+	fmt.Print("   Allow this action? (y/n): ")
 
 	tty, err := os.Open("/dev/tty")
 	if err != nil {
@@ -399,15 +399,15 @@ func confirmDestructiveAction(action llm.Action) bool {
 func humanizeReason(reason string) string {
 	switch reason {
 	case "task finished":
-		return "модель явно завершила задачу"
+		return "model explicitly finished the task"
 	case "max steps reached":
-		return "достигнут лимит шагов"
+		return "step limit reached"
 	case "interrupted by user (Ctrl+C)":
-		return "вы прервали исполнение (Ctrl+C)"
+		return "execution was interrupted by user (Ctrl+C)"
 	case "llm error":
-		return "ошибка LLM-клиента"
+		return "LLM client error"
 	case "snapshot error":
-		return "ошибка при снятии состояния страницы"
+		return "page snapshot error"
 	default:
 		return reason
 	}

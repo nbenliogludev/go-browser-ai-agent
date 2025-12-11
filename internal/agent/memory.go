@@ -7,7 +7,6 @@ import (
 	"github.com/nbenliogludev/go-browser-ai-agent/internal/llm"
 )
 
-// StepMemory — короткая память шагов + защита от циклов.
 type StepMemory struct {
 	lines    []string
 	maxLines int

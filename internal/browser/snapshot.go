@@ -12,7 +12,6 @@ import (
 	"github.com/chromedp/chromedp"
 )
 
-// ElementMap хранит BackendNodeID (внутренний ID Chrome) по нашему LLM-ID
 type ElementMap map[int]cdp.BackendNodeID
 
 type PageSnapshot struct {
@@ -22,8 +21,6 @@ type PageSnapshot struct {
 	ScreenshotBase64 string
 	Elements         ElementMap
 }
-
-// ------------------ AX TYPES (свои, не из cdproto/accessibility) ------------------
 
 type AXValue struct {
 	Value interface{} `json:"value,omitempty"`
@@ -42,8 +39,6 @@ type axTreeResult struct {
 	Nodes []AXNode `json:"nodes"`
 }
 
-// ------------------ SNAPSHOT ------------------
-
 func (m *Manager) Snapshot(step int) (*PageSnapshot, error) {
 	var (
 		axNodes []AXNode
@@ -58,7 +53,6 @@ func (m *Manager) Snapshot(step int) (*PageSnapshot, error) {
 		chromedp.Location(&url),
 		chromedp.Title(&title),
 
-		// Получаем AX-tree через сырой CDP Target (а не Browser!)
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			exec := chromedp.FromContext(ctx)
 			if exec.Target == nil {
@@ -68,7 +62,7 @@ func (m *Manager) Snapshot(step int) (*PageSnapshot, error) {
 
 			var out axTreeResult
 			params := map[string]any{
-				"interestingOnly": true, // как в Playwright: только "интересные" узлы
+				"interestingOnly": true,
 			}
 
 			if err := exec.Target.Execute(ctx, "Accessibility.getFullAXTree", params, &out); err != nil {
@@ -80,7 +74,6 @@ func (m *Manager) Snapshot(step int) (*PageSnapshot, error) {
 			return nil
 		}),
 
-		// Скриншот
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			var err error
 			buf, err = page.CaptureScreenshot().
@@ -102,7 +95,6 @@ func (m *Manager) Snapshot(step int) (*PageSnapshot, error) {
 	if axErr == nil && len(axNodes) > 0 {
 		treeStr = serializeAXNodes(axNodes, &idCounter, elements)
 	} else {
-		// Если вдруг AX не доступен – хотя бы DOM fallback, чтобы агент не ослеп
 		if axErr != nil {
 			log.Printf("⚠️ Accessibility.getFullAXTree failed (%v), fallback to DOM", axErr)
 		}
@@ -114,7 +106,7 @@ func (m *Manager) Snapshot(step int) (*PageSnapshot, error) {
 		screenshotB64 = base64.StdEncoding.EncodeToString(buf)
 	}
 
-	_ = step // чтобы не ругалась IDE, если не используешь
+	_ = step
 
 	return &PageSnapshot{
 		URL:              url,
@@ -124,8 +116,6 @@ func (m *Manager) Snapshot(step int) (*PageSnapshot, error) {
 		Elements:         elements,
 	}, nil
 }
-
-// ------------------ AX SERIALIZATION ------------------
 
 func serializeAXNodes(nodes []AXNode, idCounter *int, elements ElementMap) string {
 	if len(nodes) == 0 {
@@ -226,8 +216,6 @@ func isInteractiveRole(role string) bool {
 		return false
 	}
 }
-
-// ------------------ DOM FALLBACK НА ВСЯКИЙ СЛУЧАЙ ------------------
 
 func buildDOMFallback(ctx context.Context, idCounter *int, elements ElementMap) string {
 	var nodes []*cdp.Node
