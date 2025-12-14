@@ -35,6 +35,16 @@ type DecisionOutput struct {
 	Action       Action `json:"action"`
 }
 
+type SummaryInput struct {
+	Task        string
+	ExitReason  string
+	FinalURL    string
+	FinalAction Action
+	Duration    string
+	Steps       []string
+}
+
 type Client interface {
 	DecideAction(input DecisionInput) (*DecisionOutput, error)
+	SummarizeRun(input SummaryInput) (string, error)
 }
