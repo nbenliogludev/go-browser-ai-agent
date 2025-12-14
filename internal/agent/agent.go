@@ -7,7 +7,6 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"regexp"
 	"strings"
 	"time"
 
@@ -37,59 +36,42 @@ func (a *Agent) Run(task string, maxSteps int) error {
 	var finalAction llm.Action
 	var finalURL string
 
-	cartItems := make(map[string]int)
-
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt)
 	defer signal.Stop(sigCh)
 
-	printReport := func(reason string) {
+	printFinalReport := func(exitReason string) {
 		if len(report) == 0 {
 			return
 		}
+
+		duration := time.Since(start).Truncate(time.Millisecond).String()
+
 		fmt.Println("\n===== EXECUTION REPORT =====")
 		fmt.Printf("Task: %s\n", task)
-		fmt.Printf("Duration: %s\n", time.Since(start).Truncate(time.Millisecond))
-		if reason != "" {
-			fmt.Printf("Exit reason: %s\n", reason)
+		fmt.Printf("Duration: %s\n", duration)
+		if exitReason != "" {
+			fmt.Printf("Exit reason: %s\n", exitReason)
 		}
 
+		fmt.Println("\n--- RAW STEP TRACE ---")
 		for _, line := range report {
 			fmt.Println(line)
 		}
 
-		fmt.Println("\n----- SUMMARY -----")
-		fmt.Printf("Task: %s\n", task)
-		fmt.Printf("Total steps: %d\n", len(report))
-
-		if finalURL != "" {
-			fmt.Printf("Final URL: %s\n", finalURL)
-		}
-
-		if hr := humanizeReason(reason); hr != "" {
-			fmt.Printf("Human-readable reason: %s\n", hr)
-		}
-
-		if len(cartItems) > 0 {
-			fmt.Println("Cart actions:")
-			for name, count := range cartItems {
-				fmt.Printf("- Added to cart: %d × %s\n", count, name)
-			}
-		}
-
-		lowerURL := strings.ToLower(finalURL)
-		if strings.Contains(lowerURL, "/odeme") ||
-			strings.Contains(lowerURL, "payment") ||
-			strings.Contains(lowerURL, "checkout") {
-			fmt.Println("Checkout status: payment page reached, order was not submitted automatically.")
-		}
-
-		if finalAction.Type != "" {
-			fmt.Printf("Last action: %s [%d] %q\n",
-				finalAction.Type,
-				finalAction.TargetID,
-				finalAction.Text,
-			)
+		fmt.Println("\n--- LLM SUMMARY ---")
+		summary, err := a.llm.SummarizeRun(llm.SummaryInput{
+			Task:        task,
+			ExitReason:  humanizeReason(exitReason),
+			FinalURL:    finalURL,
+			FinalAction: finalAction,
+			Duration:    duration,
+			Steps:       mem.FullHistory(),
+		})
+		if err != nil {
+			fmt.Printf("(failed to generate LLM summary: %v)\n", err)
+		} else {
+			fmt.Println(summary)
 		}
 
 		fmt.Println("===== END OF REPORT =====")
@@ -111,7 +93,7 @@ loop:
 
 		snapshot, err := a.browser.Snapshot(step)
 		if err != nil {
-			printReport("snapshot error")
+			printFinalReport("snapshot error")
 			return fmt.Errorf("snapshot failed: %w", err)
 		}
 
@@ -129,14 +111,12 @@ loop:
 			ScreenshotBase64: snapshot.ScreenshotBase64,
 		})
 		if err != nil {
-			printReport("llm error")
+			printFinalReport("llm error")
 			return fmt.Errorf("llm error: %w", err)
 		}
 
 		finalAction = decision.Action
 		finalURL = snapshot.URL
-
-		extractCartItemsFromObservation(decision.Observation, snapshot.URL, cartItems)
 
 		decor := ""
 		if decision.Action.IsDestructive {
@@ -180,7 +160,7 @@ loop:
 
 		if decision.Action.Type == llm.ActionFinish {
 			fmt.Println("✅ Task completed!")
-			printReport("task finished")
+			printFinalReport("task finished")
 			return nil
 		}
 
@@ -199,11 +179,11 @@ loop:
 	if interrupted {
 		mem.AddSystemNote("SYSTEM: execution interrupted by user (Ctrl+C).")
 		report = append(report, "INTERRUPTED BY USER (Ctrl+C)")
-		printReport("interrupted by user (Ctrl+C)")
+		printFinalReport("interrupted by user (Ctrl+C)")
 		return fmt.Errorf("interrupted by user (Ctrl+C)")
 	}
 
-	printReport("max steps reached")
+	printFinalReport("max steps reached")
 	return fmt.Errorf("max steps reached")
 }
 
@@ -410,42 +390,5 @@ func humanizeReason(reason string) string {
 		return "page snapshot error"
 	default:
 		return reason
-	}
-}
-
-var cartItemRegexp = regexp.MustCompile(`(\d+)\s*[×x]\s*([^'"]+)`)
-
-func extractCartItemsFromObservation(obs, url string, acc map[string]int) {
-	if acc == nil {
-		return
-	}
-	lowObs := strings.ToLower(obs)
-	lowURL := strings.ToLower(url)
-
-	if !(strings.Contains(lowObs, "cart") ||
-		strings.Contains(lowObs, "sepet") ||
-		strings.Contains(lowURL, "/sepet")) {
-		return
-	}
-
-	matches := cartItemRegexp.FindAllStringSubmatch(obs, -1)
-	for _, m := range matches {
-		if len(m) < 3 {
-			continue
-		}
-		countStr := strings.TrimSpace(m[1])
-		name := strings.TrimSpace(m[2])
-
-		var count int
-		_, err := fmt.Sscanf(countStr, "%d", &count)
-		if err != nil || count <= 0 {
-			continue
-		}
-
-		if name == "" {
-			continue
-		}
-
-		acc[name] += count
 	}
 }

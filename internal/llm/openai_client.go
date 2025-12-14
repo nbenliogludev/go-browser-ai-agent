@@ -23,6 +23,7 @@ func NewOpenAIClient() (*OpenAIClient, error) {
 	return &OpenAIClient{client: openai.NewClient(apiKey)}, nil
 }
 
+// SYSTEM PROMPT for action selection
 const visionSystemPrompt = `
 You are an autonomous intelligent agent navigating a web browser.
 
@@ -103,7 +104,7 @@ NAVIGATION / RELEVANCE HEURISTICS (VERY IMPORTANT):
   see any relevant items (for example no pizzas at all):
   - Treat this as a WRONG CHOICE.
   - Prefer to navigate back (e.g., to the restaurant list) and choose a more relevant
-    restaurant (one whose name clearly matches the task, such as containing "Pizza").
+  restaurant (one whose name clearly matches the task, such as containing "Pizza").
 
 GETIRYEMEK-SPECIFIC HINT (EXAMPLE, NOT A HARD RULE):
 - If the task is "order a pizza" and you are on GetirYemek:
@@ -138,8 +139,31 @@ RESPONSE JSON FORMAT:
 }
 `
 
+// SYSTEM PROMPT for final run summary
+const summarySystemPrompt = `
+You are an analysis module for a browser automation agent.
+
+You receive:
+- The original user task,
+- Exit reason and duration,
+- The final URL and last action,
+- A compact step history produced by the agent (each line is either a step description or a system note).
+
+Produce a concise human-readable report in English that explains:
+1) Whether the task seems completed or not, and why.
+2) What the agent actually did in a short narrative (no more than a few paragraphs).
+3) Any obvious mistakes, loops, or mismatches with the task (for example, ordering 5 items instead of 2).
+4) The final state (for example, what appears to be in the cart, which page we ended on, whether payment was performed).
+5) Suggestions for improving the agent's behavior in future runs.
+
+Do not invent actions that are not implied by the step history.
+If something is unclear from the data, say that it is unclear instead of guessing.
+`
+
+// Limit for DOM text sent to the model
 const safeDOMLimit = 20000
 
+// DecideAction asks the model what to do next on the current page.
 func (c *OpenAIClient) DecideAction(input DecisionInput) (*DecisionOutput, error) {
 	ctx := context.Background()
 
@@ -148,7 +172,7 @@ func (c *OpenAIClient) DecideAction(input DecisionInput) (*DecisionOutput, error
 	sb.WriteString("URL: " + input.CurrentURL + "\n")
 
 	if input.History != "" {
-		sb.WriteString("HISTORY (Last 5 steps):\n" + input.History + "\n")
+		sb.WriteString("HISTORY (Last steps):\n" + input.History + "\n")
 	}
 
 	dom := input.DOMTree
@@ -244,4 +268,70 @@ func (c *OpenAIClient) DecideAction(input DecisionInput) (*DecisionOutput, error
 	}
 
 	return &out, nil
+}
+
+// SummarizeRun lets the LLM generate a final human-readable report
+// based on the task, exit reason, duration, final state and step history.
+func (c *OpenAIClient) SummarizeRun(input SummaryInput) (string, error) {
+	ctx := context.Background()
+
+	var sb strings.Builder
+
+	sb.WriteString("TASK:\n")
+	sb.WriteString(input.Task)
+	sb.WriteString("\n\n")
+
+	if input.ExitReason != "" {
+		sb.WriteString("EXIT_REASON:\n")
+		sb.WriteString(input.ExitReason)
+		sb.WriteString("\n\n")
+	}
+
+	if input.Duration != "" {
+		sb.WriteString("DURATION:\n")
+		sb.WriteString(input.Duration)
+		sb.WriteString("\n\n")
+	}
+
+	if input.FinalURL != "" {
+		sb.WriteString("FINAL_URL:\n")
+		sb.WriteString(input.FinalURL)
+		sb.WriteString("\n\n")
+	}
+
+	if input.FinalAction.Type != "" {
+		sb.WriteString("FINAL_ACTION:\n")
+		sb.WriteString(fmt.Sprintf("type=%s target_id=%d text=%q\n",
+			input.FinalAction.Type,
+			input.FinalAction.TargetID,
+			input.FinalAction.Text,
+		))
+		sb.WriteString("\n")
+	}
+
+	if len(input.Steps) > 0 {
+		sb.WriteString("STEP_HISTORY:\n")
+		for _, line := range input.Steps {
+			sb.WriteString(line)
+			sb.WriteString("\n")
+		}
+	}
+
+	resp, err := c.client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
+		Model: "gpt-4o",
+		Messages: []openai.ChatCompletionMessage{
+			{Role: openai.ChatMessageRoleSystem, Content: summarySystemPrompt},
+			{Role: openai.ChatMessageRoleUser, Content: sb.String()},
+		},
+		Temperature: 0.2,
+		MaxTokens:   600,
+	})
+	if err != nil {
+		return "", err
+	}
+	if len(resp.Choices) == 0 {
+		return "", fmt.Errorf("no choices for summary")
+	}
+
+	return resp.Choices[0].Message.Content, nil
 }
